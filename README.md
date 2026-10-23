@@ -2,7 +2,7 @@
 
 **Version 1.0.5** (2026-10-22)
 
-`nhp-linux-installer.sh` installs [OpenNHP](https://github.com/OpenNHP/opennhp) on one Ubuntu 24.04 server. `nhp-manage-agents.sh` adds or removes trusted devices after install. Both scripts use the same version number. When either script changes, raise `INSTALLER_VERSION` in both files and add a [Changelog](#changelog) entry.
+`nhp-linux-installer.sh` installs [OpenNHP](https://github.com/OpenNHP/opennhp) on one Ubuntu 24.04 server. `nhp-manage-agents.sh` adds or removes trusted devices after install. Both scripts live in [OpenNHP-Ubuntu-Installer](https://github.com/justingreerbbi/OpenNHP-Ubuntu-Installer). They use the same version number. When either script changes, raise `INSTALLER_VERSION` in both files and add a [Changelog](#changelog) entry.
 
 ```bash
 bash nhp-linux-installer.sh --version
@@ -51,7 +51,7 @@ The phone or other client should be on a different network from the EC2 instance
 
 Before you turn the website firewall on later, have another way back in, such as EC2 Session Manager or the EC2 serial console. That matters if the SSH session drops while protection is on.
 
-The server also needs outbound HTTPS during install, so it can download packages, Go, and the OpenNHP source.
+The server also needs outbound HTTPS during install, so it can download packages, Go, this installer, and the OpenNHP source.
 
 ## Sign in
 
@@ -64,7 +64,22 @@ ssh -i /path/to/your-key.pem ubuntu@PUBLIC_IP
 
 The Ubuntu AMI signs you in as the user `ubuntu`.
 
-## Copy the installer to the server
+## Get the installer
+
+Clone the repository on the server, or copy the scripts from your computer.
+
+### Clone
+
+From the SSH session:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git
+git clone https://github.com/justingreerbbi/OpenNHP-Ubuntu-Installer.git
+cd OpenNHP-Ubuntu-Installer
+```
+
+### Copy
 
 From the project directory on your computer, with the SSH session closed or from a second terminal:
 
@@ -72,14 +87,13 @@ From the project directory on your computer, with the SSH session closed or from
 scp -i /path/to/your-key.pem nhp-linux-installer.sh nhp-manage-agents.sh ubuntu@PUBLIC_IP:
 ```
 
-The files land in `/home/ubuntu/`.
+The files land in `/home/ubuntu/`. Sign in again and run the installer from that directory.
 
 ## Run the installer
 
-Sign in again and start the installer from that home directory. It must be an interactive SSH session. Prompts are read from the terminal, so a piped or non-interactive run exits immediately.
+Run it from the directory that contains `nhp-linux-installer.sh`. It must be an interactive SSH session. Prompts are read from the terminal, so a piped or non-interactive run exits immediately.
 
 ```bash
-ssh -i /path/to/your-key.pem ubuntu@PUBLIC_IP
 sudo bash nhp-linux-installer.sh
 ```
 
@@ -176,7 +190,7 @@ The server log still records the send, including the code, on a line like `Reque
 
 Running the installer again rewrites this config file and removes the SMTP settings. Put them back after a re-run, or they will not be used.
 
-You can also add a public key by hand:
+You can also add a public key by hand. Run this from the same directory as the installer:
 
 ```bash
 sudo bash nhp-manage-agents.sh
@@ -325,7 +339,6 @@ First tracked release.
 ## Todos
 
 - Look into tracking trusted devices so an inactive device can be removed from the trusted list.
-- Update the documentaiton to use the GitHub repo to install instead of scp tranfer.
 - Add a production install path. Pull requests are welcome.
 
 ## Limits
