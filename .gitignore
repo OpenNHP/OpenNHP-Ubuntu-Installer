@@ -47,3 +47,4 @@ service-account*.json
 # Logs can contain one-time registration codes
 *.log
 logs/
+.DS_Store
