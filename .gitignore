@@ -1,0 +1,49 @@
+# Editor settings can hold hostnames and private-key paths
+.vscode/
+.idea/
+*.code-workspace
+
+# Environment and local installer state
+.env
+.env.*
+!.env.example
+installer.env
+*.local
+
+# SSH, TLS, and other private keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+*.crt
+*.cer
+
+# OpenNHP key material and trusted-device records
+secrets/
+clients.json
+agent.json
+server.json
+ac.json
+cert/
+
+# Cloud and service credentials
+.aws/
+.ssh/
+*credentials*
+*secret*
+*.secret
+service-account*.json
+*-credentials.json
+
+# Logs can contain one-time registration codes
+*.log
+logs/
