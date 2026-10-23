@@ -40,12 +40,12 @@ The phone or other client should be on a different network from the EC2 instance
 5. Use a subnet that assigns a public IPv4 address. Leave public IPv6 off. The installer stops if the host has a global IPv6 address.
 6. Create a security group with these inbound rules:
    | Type | Port | Source |
-     | --- | --- | --- |
-     | SSH | TCP 22 | Your IP only |
-     | Custom UDP | 62206 | The phones or networks that will knock |
-     | HTTP | TCP 80 | Those same clients |
+      | --- | --- | --- |
+      | SSH | TCP 22 | Your IP only |
+      | Custom UDP | 62206 | The phones or networks that will knock |
+      | HTTP | TCP 80 | Those same clients |
 
-     The installer cannot change this security group. If these ports are closed in AWS, the instance never sees the traffic.
+      The installer cannot change this security group. If these ports are closed in AWS, the instance never sees the traffic.
 7. Leave the disk at the default size and launch the instance.
 8. Wait until the instance is **Running** and the status checks pass. Copy the public IPv4 address.
 
@@ -341,6 +341,7 @@ First tracked release.
 - Look into tracking trusted devices so an inactive device can be removed from the trusted list.
 - Add a production install path. Pull requests are welcome.
 - Update termanology in to follow OpenNHP's instead of saying "Devices".
+- Add new plugin to create NHP to Web App Authentication API? Right now the example plugin is being used. It would be nice if there was a way for NHP to be able to access web app data for legit user verification. Need to explore the potential here.
 
 ## Limits
 
