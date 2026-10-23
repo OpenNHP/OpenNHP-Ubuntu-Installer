@@ -342,6 +342,8 @@ First tracked release.
 - Add a production install path. Pull requests are welcome.
 - Update termanology in to follow OpenNHP's instead of saying "Devices".
 - Add new plugin to create NHP to Web App Authentication API? Right now the example plugin is being used. It would be nice if there was a way for NHP to be able to access web app data for legit user verification. Need to explore the potential here.
+- Update repo name to be more appropriate. 
+- Installer logic is a basic installer. It migh tbe benificial if the installer checks the current enviroment to deturmine if there is a server already running and what kind on what ports. The current installer is a basic HTTP/80 setup with no additional checks.
 
 ## Limits
 
