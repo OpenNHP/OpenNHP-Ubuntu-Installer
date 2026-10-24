@@ -5,10 +5,10 @@
 set -Eeuo pipefail
 umask 077
 
-# Keep this in sync with nhp-manage-agents.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.5
+# Keep this in sync with opennhp-manage-agents.sh and the changelog in README.md.
+INSTALLER_VERSION=1.0.6
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
-  printf 'nhp-linux-installer.sh %s\n' "$INSTALLER_VERSION"
+  printf 'opennhp-ubuntu-installer.sh %s\n' "$INSTALLER_VERSION"
   exit 0
 fi
 
@@ -171,8 +171,8 @@ save_state(){
 }
 trap 'warn "Installer exited at line $LINENO. Re-run it to resume; existing keys remain unchanged."' ERR
 
-[[ -t 0 && -e /dev/tty ]] || die 'Run interactively from an SSH terminal: sudo bash nhp-linux-installer.sh'
-[[ $EUID == 0 ]] || die 'Run with sudo: sudo bash nhp-linux-installer.sh'
+[[ -t 0 && -e /dev/tty ]] || die 'Run interactively from an SSH terminal: sudo bash opennhp-ubuntu-installer.sh'
+[[ $EUID == 0 ]] || die 'Run with sudo: sudo bash opennhp-ubuntu-installer.sh'
 [[ $(uname -m) == x86_64 ]] || die 'This installer targets x86_64 Ubuntu (e.g., EC2 t3.small).'
 source /etc/os-release
 # The firewall profile below is intentionally IPv4-only. Refuse public IPv6.
