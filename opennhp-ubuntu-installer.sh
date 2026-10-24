@@ -22,13 +22,34 @@ AGENT="$SRC/release/nhp-agent"
 STATE="$ROOT/installer.env"
 TTL=1924991999
 
-say(){ printf '\n\033[1m%s\033[0m\n' "$*"; }
+# ---- Interface -------------------------------------------------------------
+# Everything below is presentation only. Colors fall back to plain text when
+# output is not a terminal or NO_COLOR is set.
+if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+else
+  BOLD=''; DIM=''; RED=''; GREEN=''; YELLOW=''; CYAN=''; RESET=''
+fi
+# Terminal width, clamped so rules stay tidy on wide or tiny terminals.
+_cols(){ local w; w=$(tput cols 2>/dev/null || echo 72); (( w > 72 )) && w=72 || true; (( w < 40 )) && w=40 || true; printf '%s' "$w"; }
+_rule(){ local w; w=$(_cols); printf '%s' "$1"; printf '─%.0s' $(seq "$w"); printf '%s\n' "$RESET"; }
+# Ruled banner: bold title with an optional dimmed subtitle.
+header(){
+  printf '\n'; _rule "$CYAN"
+  printf ' %s%s%s' "$BOLD" "$1" "$RESET"
+  [[ -n ${2:-} ]] && printf '  %s%s%s' "$DIM" "$2" "$RESET"
+  printf '\n'; _rule "$CYAN"
+}
+# Section heading, underlined to the width of its title.
+say(){ printf '\n%s%s%s\n%s' "${BOLD}${CYAN}" "$1" "$RESET" "$DIM"; printf '─%.0s' $(seq "${#1}"); printf '%s\n' "$RESET"; }
 info(){ printf '  %s\n' "$*"; }
-ok(){ printf '  \033[32m+\033[0m %s\n' "$*"; }
-warn(){ printf '  \033[33m!\033[0m %s\n' "$*"; }
-die(){ printf '\n\033[31mError\033[0m  %s\n' "$*" >&2; exit 1; }
-ask(){ local v; read -r -p "$1" v </dev/tty; printf '%s' "$v"; }
-pause(){ read -r -p "$1" _ </dev/tty; }
+ok(){ printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn(){ printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
+die(){ printf '\n  %s✗ Error:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+kv(){ printf '  %s%-16s%s %s\n' "$DIM" "$1" "$RESET" "$2"; }
+ask(){ local v; read -r -p "  ${CYAN}❯${RESET} $1" v </dev/tty; printf '%s' "$v"; }
+pause(){ read -r -p "  ${CYAN}❯${RESET} $1" _ </dev/tty; printf '\n'; }
 confirm(){ local v; v=$(ask "$1 [y/N]: "); [[ ${v,,} == y || ${v,,} == yes ]]; }
 # Empty input keeps the saved choice. 1 means yes.
 prompt_bool(){
@@ -41,7 +62,6 @@ prompt_bool(){
   fi
   [[ ${v,,} == y || ${v,,} == yes ]]
 }
-kv(){ printf '  %-18s %s\n' "$1" "$2"; }
 # Ports that must never be placed behind NHP: SSH and the knock port.
 # Guarding either would risk locking the operator out or breaking knocks.
 RESERVED_PORTS='22 62206'
@@ -340,7 +360,7 @@ PROTECTED_PORTS=''
 # installer.env records the version that wrote it. Keep this script's version.
 INSTALLER_VERSION=$script_version
 
-say "OpenNHP installer ${INSTALLER_VERSION}"
+header 'OpenNHP Installer' "v${INSTALLER_VERSION}"
 preflight
 info 'Installs the OpenNHP server and access controller on this host.'
 info 'You choose which TCP ports to place behind a knock. SSH and UDP 62206 stay open.'
@@ -371,9 +391,9 @@ else
   confirm 'Install OpenNHP on this host?' || exit 0
 fi
 
-say 'Choices'
-info 'The demo site is NGINX and a sample page on port 80. It replaces /var/www/html/index.html.'
-info 'Skip it when this host already serves its own site. TCP 80 can still be guarded.'
+say 'Demo website'
+info 'NGINX serves a sample page on TCP 80. It replaces /var/www/html/index.html.'
+info 'Skip it when this host already serves its own site; TCP 80 can still be guarded.'
 if prompt_bool 'Install the demo website' "$PREV_DEMO"; then
   INSTALL_DEMO=1
   ok 'Demo website will be installed'
@@ -381,8 +401,10 @@ else
   INSTALL_DEMO=0
   ok 'Demo website will be skipped'
 fi
-info 'One-time registration lets a device request a 6-digit code and register its own key.'
-info 'Until email is configured, that code is written to the server log.'
+
+say 'One-time registration'
+info 'Lets a device request a 6-digit code and register its own key.'
+info 'Until email is configured, the code is written to the server log.'
 if prompt_bool 'Enable one-time registration' "$PREV_OTP"; then
   ENABLE_OTP=1
   ok 'One-time registration will be enabled'
@@ -391,7 +413,8 @@ else
   ok 'One-time registration will be left off'
 fi
 
-info 'OpenNHP guards one or more TCP ports: new connections are dropped until a knock opens them.'
+say 'Protected ports'
+info 'OpenNHP guards one or more TCP ports; new connections drop until a knock opens them.'
 info 'SSH (22) and the knock port (62206) are never guarded. The default is TCP 80.'
 info 'Re-running the installer can change this set without touching keys or trusted agents.'
 if [[ -n $PRESET_PORTS ]]; then
@@ -987,6 +1010,7 @@ if confirm "Protect TCP ${PROTECTED_PORTS} and start the access controller now?"
       warn "$unit is not running"
     fi
   done
+  printf '\n'
   pause 'Press Enter after you confirm this SSH session still works...'
   if confirm "Keep TCP ${PROTECTED_PORTS} protected on boot?"; then
     systemctl stop nhp-rollback.timer 2>/dev/null || true
@@ -1003,7 +1027,7 @@ else
   warn "TCP ${PROTECTED_PORTS} was left open."
 fi
 
-say 'Summary'
+header 'Installation summary'
 kv 'Installer' "$INSTALLER_VERSION"
 kv 'OpenNHP' "$OPENNHP_REF ($(git -C "$SRC" rev-parse --short HEAD))"
 kv 'Server key' "$server_pub"

@@ -357,6 +357,7 @@ The firewall allows an existing connection to finish, allows a device that just 
 - You can now choose which TCP ports OpenNHP protects, instead of only TCP 80. Enter one or more ports at install time (default 80); SSH (22) and the knock port (62206) are rejected. Set `PROTECTED_PORTS` to skip the prompt. See [Choose which ports to protect](#choose-which-ports-to-protect).
 - Re-running the installer can change the protected ports without resetting keys or trusted devices. Firewall rules for ports no longer protected are removed automatically, and the 180-second rollback still applies.
 - The generated firewall rules now use a single multiport rule and reconcile themselves on each start/stop, so stale port rules are cleaned up.
+- Refreshed the command-line interface of both scripts: a ruled banner, consistent section headers, aligned status lines, and a cleaner summary. Set `NO_COLOR=1` for plain output.
 
 ### 1.0.7 — 2026-10-24
 
