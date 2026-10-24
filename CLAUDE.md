@@ -11,7 +11,7 @@ The project is two Bash scripts, not a Go program. There is no compiler, no modu
 - `opennhp-ubuntu-installer.sh` — installs or updates OpenNHP (server, access controller, agent, example plugin) and an optional NGINX demo site on one host.
 - `opennhp-manage-agents.sh` — adds, lists, and removes trusted device keys after install.
 
-Both scripts share one version number and target **Ubuntu 24.04 LTS, x86_64 only**. They reject other operating systems, other Ubuntu versions, and ARM.
+Both scripts share one version number and target **supported Ubuntu LTS releases, x86_64 only** — 24.04 (primary baseline), 26.04 (supported), and 22.04 (deprecated, works with a warning). Other Ubuntu versions are rejected unless `ALLOW_UNSUPPORTED_UBUNTU=1` is set; other operating systems and ARM are always rejected. The installer runs these as a `preflight` system/compatibility summary at startup — keep the supported-version list in `ubuntu_support_status()` in sync with the policy table in [README.md](README.md).
 
 ## Repository Layout
 
@@ -66,7 +66,7 @@ sudo bash opennhp-manage-agents.sh
 
 ## Testing
 
-There is no local test harness. A real change must be verified on a fresh **Ubuntu 24.04 x86_64** host (an EC2 instance is the documented path — see [README.md](README.md)). Do not claim the installer works unless it has been run end-to-end on such a host.
+There is no local test harness. A real change must be verified on a fresh **supported Ubuntu LTS x86_64** host — 24.04 is the baseline; verify version-support changes on each release they claim to add (an EC2 instance is the documented path — see [README.md](README.md)). Do not claim the installer works unless it has been run end-to-end on such a host.
 
 Before any run, lint with `shellcheck` and parse-check with `bash -n`. These catch most regressions without a server.
 

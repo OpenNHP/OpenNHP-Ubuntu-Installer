@@ -1,8 +1,8 @@
 # OpenNHP Ubuntu installer
 
-**Version 1.0.6** (2026-10-23)
+**Version 1.0.7** (2026-10-24)
 
-`opennhp-ubuntu-installer.sh` installs [OpenNHP](https://github.com/OpenNHP/opennhp) on one Ubuntu 24.04 server. `opennhp-manage-agents.sh` adds or removes trusted devices after install. Both scripts live in [OpenNHP-Ubuntu-Installer](https://github.com/OpenNHP/OpenNHP-Ubuntu-Installer). They use the same version number. When either script changes, raise `INSTALLER_VERSION` in both files and add a [Changelog](#changelog) entry.
+`opennhp-ubuntu-installer.sh` installs [OpenNHP](https://github.com/OpenNHP/opennhp) on one supported Ubuntu LTS server (24.04 is the baseline; 22.04 and 26.04 also work — see [Supported Ubuntu versions](#supported-ubuntu-versions)). `opennhp-manage-agents.sh` adds or removes trusted devices after install. Both scripts live in [OpenNHP-Ubuntu-Installer](https://github.com/OpenNHP/OpenNHP-Ubuntu-Installer). They use the same version number. When either script changes, raise `INSTALLER_VERSION` in both files and add a [Changelog](#changelog) entry.
 
 ```bash
 bash opennhp-ubuntu-installer.sh --version
@@ -14,6 +14,26 @@ bash opennhp-manage-agents.sh --version
 This installer gets OpenNHP running so you can try it. It is not ready for production out of the box. Before you depend on it, configure production separately. That includes how registration codes are delivered, how long device keys stay trusted, who is allowed to register, and the EC2 security group.
 
 A pull request that adds a production install of OpenNHP is welcome.
+
+## Supported Ubuntu versions
+
+The installer checks the host's release at startup and installs only on a supported Ubuntu LTS version. Unsupported releases are rejected rather than attempted without validation.
+
+| Ubuntu LTS | Status | Standard support ends | Notes |
+| --- | --- | --- | --- |
+| 22.04 | Deprecated | May 2027 | Still works, but standard security maintenance ends soon. Prefer 24.04 for new deployments. |
+| 24.04 | Primary | May 2029 | Development and testing baseline. Recommended. |
+| 26.04 | Supported | May 2031 | Newest LTS, with the longest support window. |
+
+Only 64-bit x86 (`x86_64`) is supported. ARM, non-LTS releases, and other operating systems are rejected.
+
+**Retirement policy.** A release is retired once it reaches the end of its standard security maintenance. While a version is deprecated, the installer still runs but warns you to move to a maintained release.
+
+To install on an unsupported release at your own risk, set `ALLOW_UNSUPPORTED_UBUNTU=1`. This bypasses only the version check; the architecture, IPv6, and systemd checks still apply.
+
+```bash
+sudo ALLOW_UNSUPPORTED_UBUNTU=1 bash opennhp-ubuntu-installer.sh
+```
 
 ## What you get
 
@@ -34,7 +54,7 @@ The phone or other client should be on a different network from the EC2 instance
 ## Start the EC2 instance
 
 1. In the EC2 console, choose **Launch instance**.
-2. Name the instance, then pick the AMI **Ubuntu Server 24.04 LTS**, 64-bit (x86). The installer rejects other operating systems and rejects ARM.
+2. Name the instance, then pick a supported **Ubuntu Server LTS** AMI (24.04 recommended; 22.04 or 26.04 also work), 64-bit (x86). The installer rejects other operating systems, non-LTS releases, and ARM.
 3. Choose an instance type such as `t3.small`.
 4. Create or select a key pair. Download the private key. You need it to sign in.
 5. Use a subnet that assigns a public IPv4 address. Leave public IPv6 off. The installer stops if the host has a global IPv6 address.
@@ -99,6 +119,8 @@ Run it from the directory that contains `opennhp-ubuntu-installer.sh`. It must b
 sudo bash opennhp-ubuntu-installer.sh
 ```
 
+Before it changes anything, the installer prints a **system and compatibility summary**: the host's OS, kernel, architecture, CPU, memory, and free disk, followed by a pass (`+`), warn (`!`), or fail line for each check — architecture, Ubuntu version, IPv4-only networking, and systemd. Memory, disk, and outbound-HTTPS shortfalls only warn. If a required check fails, the installer stops before touching the system.
+
 Answer `y` at the first prompt to install on this host. Any other answer exits before the install changes the system.
 
 If OpenNHP is already on the host, the script asks you to choose:
@@ -130,6 +152,7 @@ Optional settings, placed on the same command:
 | `GO_VERSION` | `1.26.0` | Go release installed under `/usr/local/go` when that exact version is missing. |
 | `PUBLIC_IP` | Detected from `https://checkip.amazonaws.com` | Address clients should knock. You still confirm it. A DNS name is allowed. |
 | `OPENNHP_REF` | Asked during install | Skip the release menu. Example: `OPENNHP_REF=v1.0.2`. |
+| `ALLOW_UNSUPPORTED_UBUNTU` | `0` | Set to `1` to bypass the Ubuntu version check and install on an unsupported release at your own risk. The other checks still apply. |
 
 ```bash
 sudo PUBLIC_IP=203.0.113.10 OPENNHP_REF=v1.0.2 bash opennhp-ubuntu-installer.sh
@@ -302,6 +325,11 @@ The firewall allows an existing connection to finish, allows a device that just 
 
 `INSTALLER_VERSION` is printed at startup and stored in `/opt/opennhp/installer.env`.
 
+### 1.0.7 — 2026-10-24
+
+- Expanded Ubuntu support beyond 24.04. Supported LTS releases are now 22.04 (deprecated), 24.04 (primary baseline), and 26.04. Unsupported releases are rejected unless `ALLOW_UNSUPPORTED_UBUNTU=1` is set. See [Supported Ubuntu versions](#supported-ubuntu-versions).
+- The installer prints a system and compatibility summary at startup (OS, kernel, architecture, CPU, memory, free disk) with a pass/warn/fail line for each check. Required checks (architecture, Ubuntu version, IPv4-only networking, systemd) stop the install when they fail; resource and connectivity shortfalls only warn.
+
 ### 1.0.6 — 2026-10-23
 
 - Renamed the scripts to match the OpenNHP project: `nhp-linux-installer.sh` is now `opennhp-ubuntu-installer.sh`, and `nhp-manage-agents.sh` is now `opennhp-manage-agents.sh`. Update any saved commands, `scp` copies, or automation that referenced the old names.
@@ -359,4 +387,4 @@ First tracked release.
 - It does not open SSH, the knock port, or any port other than TCP 80 in the host firewall.
 - A trusted device is allowed to open the `web` resource without a separate password.
 - A normal re-run keeps keys in `/opt/opennhp/secrets`. Choose uninstall at the start when those keys, trusted devices, and firewall rules should be deleted.
-- It does not build for ARM, for Ubuntu versions other than 24.04, or for hosts that have a global IPv6 address.
+- It does not build for ARM, for non-LTS or otherwise unsupported Ubuntu versions, or for hosts that have a global IPv6 address.
