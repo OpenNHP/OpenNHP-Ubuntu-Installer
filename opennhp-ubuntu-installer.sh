@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 
 # Keep this in sync with opennhp-manage-agents.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.7
+INSTALLER_VERSION=1.0.8
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   printf 'opennhp-ubuntu-installer.sh %s\n' "$INSTALLER_VERSION"
   exit 0
@@ -22,13 +22,34 @@ AGENT="$SRC/release/nhp-agent"
 STATE="$ROOT/installer.env"
 TTL=1924991999
 
-say(){ printf '\n\033[1m%s\033[0m\n' "$*"; }
+# ---- Interface -------------------------------------------------------------
+# Everything below is presentation only. Colors fall back to plain text when
+# output is not a terminal or NO_COLOR is set.
+if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+else
+  BOLD=''; DIM=''; RED=''; GREEN=''; YELLOW=''; CYAN=''; RESET=''
+fi
+# Terminal width, clamped so rules stay tidy on wide or tiny terminals.
+_cols(){ local w; w=$(tput cols 2>/dev/null || echo 72); (( w > 72 )) && w=72 || true; (( w < 40 )) && w=40 || true; printf '%s' "$w"; }
+_rule(){ local w; w=$(_cols); printf '%s' "$1"; printf '─%.0s' $(seq "$w"); printf '%s\n' "$RESET"; }
+# Ruled banner: bold title with an optional dimmed subtitle.
+header(){
+  printf '\n'; _rule "$CYAN"
+  printf ' %s%s%s' "$BOLD" "$1" "$RESET"
+  [[ -n ${2:-} ]] && printf '  %s%s%s' "$DIM" "$2" "$RESET"
+  printf '\n'; _rule "$CYAN"
+}
+# Section heading, underlined to the width of its title.
+say(){ printf '\n%s%s%s\n%s' "${BOLD}${CYAN}" "$1" "$RESET" "$DIM"; printf '─%.0s' $(seq "${#1}"); printf '%s\n' "$RESET"; }
 info(){ printf '  %s\n' "$*"; }
-ok(){ printf '  \033[32m+\033[0m %s\n' "$*"; }
-warn(){ printf '  \033[33m!\033[0m %s\n' "$*"; }
-die(){ printf '\n\033[31mError\033[0m  %s\n' "$*" >&2; exit 1; }
-ask(){ local v; read -r -p "$1" v </dev/tty; printf '%s' "$v"; }
-pause(){ read -r -p "$1" _ </dev/tty; }
+ok(){ printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn(){ printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
+die(){ printf '\n  %s✗ Error:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+kv(){ printf '  %s%-16s%s %s\n' "$DIM" "$1" "$RESET" "$2"; }
+ask(){ local v; read -r -p "  ${CYAN}❯${RESET} $1" v </dev/tty; printf '%s' "$v"; }
+pause(){ read -r -p "  ${CYAN}❯${RESET} $1" _ </dev/tty; printf '\n'; }
 confirm(){ local v; v=$(ask "$1 [y/N]: "); [[ ${v,,} == y || ${v,,} == yes ]]; }
 # Empty input keeps the saved choice. 1 means yes.
 prompt_bool(){
@@ -41,7 +62,45 @@ prompt_bool(){
   fi
   [[ ${v,,} == y || ${v,,} == yes ]]
 }
-kv(){ printf '  %-18s %s\n' "$1" "$2"; }
+# Ports that must never be placed behind NHP: SSH and the knock port.
+# Guarding either would risk locking the operator out or breaking knocks.
+RESERVED_PORTS='22 62206'
+MAX_PORTS=15
+# Validate and normalize a TCP port list. Accepts a space- or comma-separated
+# string. On success prints a comma-separated, de-duplicated list (order
+# preserved). On failure prints nothing and writes the reason to stderr.
+normalize_ports(){
+  local raw=${1//,/ } tok p seen=' ' out=()
+  for tok in $raw; do
+    [[ $tok =~ ^[0-9]+$ ]] || { echo "Not a number: '$tok'" >&2; return 1; }
+    p=$((10#$tok))
+    (( p >= 1 && p <= 65535 )) || { echo "Port out of range (1-65535): $tok" >&2; return 1; }
+    [[ " $RESERVED_PORTS " == *" $p "* ]] && { echo "Port $p is reserved; SSH (22) and the knock port (${KNOCK_PORT:-62206}) must stay reachable" >&2; return 1; }
+    [[ $seen == *" $p "* ]] && continue
+    seen+="$p "
+    out+=("$p")
+  done
+  (( ${#out[@]} > 0 )) || { echo 'No valid ports given' >&2; return 1; }
+  (( ${#out[@]} <= MAX_PORTS )) || { echo "Too many ports (max $MAX_PORTS)" >&2; return 1; }
+  local IFS=,
+  echo "${out[*]}"
+}
+# True when $2 (comma list) contains port $1.
+ports_include(){ [[ ",$2," == *",$1,"* ]]; }
+# Ask for the TCP ports to protect, re-prompting until the entry is valid.
+# Sets PROTECTED_PORTS to the normalized list.
+choose_ports(){
+  local default=$1 raw norm
+  while true; do
+    raw=$(ask "TCP ports to protect, space or comma separated [$default]: ")
+    raw=${raw:-$default}
+    if norm=$(normalize_ports "$raw"); then
+      PROTECTED_PORTS=$norm
+      return 0
+    fi
+    info "Enter one or more TCP ports (1-65535). 22 and the knock port (${KNOCK_PORT:-62206}) are not allowed."
+  done
+}
 # Hide a long command. On failure, show the tail of its output and stop.
 run_quiet(){
   local label=$1 log
@@ -126,8 +185,10 @@ uninstall_opennhp(){
   if [[ -x /usr/local/sbin/nhp-firewall-rules ]]; then
     /usr/local/sbin/nhp-firewall-rules stop || true
   fi
-  while iptables -C INPUT -p tcp --dport 80 -j OPENNHP >/dev/null 2>&1; do
-    iptables -D INPUT -p tcp --dport 80 -j OPENNHP
+  # Remove every INPUT jump into OPENNHP, whatever ports it covered, in case
+  # the firewall-rules helper is missing (partial install).
+  iptables -S INPUT 2>/dev/null | awk '/-j OPENNHP$/{$1="-D"; print}' | while read -r spec; do
+    iptables $spec 2>/dev/null || true
   done
   iptables -F OPENNHP 2>/dev/null || true
   iptables -X OPENNHP 2>/dev/null || true
@@ -166,6 +227,8 @@ save_state(){
     [[ -n ${BUILT_COMMIT:-} ]] && printf 'BUILT_COMMIT=%q\n' "$BUILT_COMMIT"
     [[ -n ${ENABLE_OTP:-} ]] && printf 'ENABLE_OTP=%q\n' "$ENABLE_OTP"
     [[ -n ${INSTALL_DEMO:-} ]] && printf 'INSTALL_DEMO=%q\n' "$INSTALL_DEMO"
+    [[ -n ${PROTECTED_PORTS:-} ]] && printf 'PROTECTED_PORTS=%q\n' "$PROTECTED_PORTS"
+    [[ -n ${KNOCK_PORT:-} ]] && printf 'KNOCK_PORT=%q\n' "$KNOCK_PORT"
   } > "$STATE"
   chmod 600 "$STATE"
 }
@@ -181,6 +244,63 @@ ubuntu_support_status(){
     22.04) printf 'deprecated' ;;
     *)     printf 'unsupported' ;;
   esac
+}
+# Classify a listening socket's bind address by how exposed it is:
+#   internal  loopback only (reachable just from this host)
+#   private   a specific LAN/VPC address (RFC1918, link-local, or IPv6 ULA)
+#   public    all interfaces (0.0.0.0 / ::) or a routable address
+_bind_scope(){
+  local h=$1
+  h=${h#\[}; h=${h%\]}; h=${h%%\%*}
+  case $h in
+    0.0.0.0|'*'|''|::) echo public ;;
+    127.*|::1) echo internal ;;
+    10.*|192.168.*|169.254.*) echo private ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) echo private ;;
+    fe80:*|fc[0-9a-f][0-9a-f]:*|fd[0-9a-f][0-9a-f]:*) echo private ;;
+    *) echo public ;;
+  esac
+}
+# List listening TCP ports with the service and exposure of each, so the
+# operator can see what is already running, and how reachable it is, before
+# choosing which ports to protect. Needs root (already checked) for names.
+list_open_ports(){
+  command -v ss >/dev/null 2>&1 || { info 'ss is not available; skipping the open-port list.'; return 0; }
+  declare -A proc_of=() scope_of=()
+  local proto state rq sq laddr peer rest port proc host scope rank oldrank key k tag color
+  # Scan TCP and UDP listeners separately; the knock arrives on UDP, so a
+  # UDP-only service (nhp-serverd) must not be hidden behind a TCP entry.
+  for proto in tcp udp; do
+    while read -r state rq sq laddr peer rest; do
+      [[ -n $laddr ]] || continue
+      port=${laddr##*:}
+      [[ $port =~ ^[0-9]+$ ]] || continue
+      host=${laddr%:*}
+      scope=$(_bind_scope "$host")
+      proc=$(sed -n 's/.*users:((\"\([^"]*\)\".*/\1/p' <<<"$rest")
+      [[ -n $proc ]] || proc='-'
+      key="$port/$proto"
+      [[ -n ${proc_of[$key]:-} ]] || proc_of[$key]=$proc
+      # Keep the most-exposed scope seen for a port (public > private > internal).
+      case $scope in public) rank=3 ;; private) rank=2 ;; *) rank=1 ;; esac
+      case ${scope_of[$key]:-} in public) oldrank=3 ;; private) oldrank=2 ;; internal) oldrank=1 ;; *) oldrank=0 ;; esac
+      if (( rank > oldrank )); then scope_of[$key]=$scope; fi
+    done < <(if [[ $proto == tcp ]]; then ss -H -tlnp 2>/dev/null; else ss -H -ulnp 2>/dev/null; fi)
+  done
+  if (( ${#proc_of[@]} == 0 )); then
+    info 'No listening ports detected.'
+    return 0
+  fi
+  for k in $(printf '%s\n' "${!proc_of[@]}" | sort -t/ -k1,1n -k2,2); do
+    port=${k%/*}; proto=${k#*/}
+    scope=${scope_of[$k]}
+    case $scope in
+      public)  color=$YELLOW; tag='public' ;;
+      private) color=$CYAN;   tag='private' ;;
+      *)       color=$DIM;    tag='internal' ;;
+    esac
+    printf '  %s%-11s%s %s%-8s%s %s\n' "$DIM" "${port}/${proto}" "$RESET" "$color" "$tag" "$RESET" "${proc_of[$k]}"
+  done
 }
 # Gather host facts, print a system summary, then run the compatibility
 # checks. Hard requirements (architecture, a supported Ubuntu release,
@@ -200,7 +320,7 @@ preflight(){
   [[ -n $disk_avail ]] || disk_avail='?'
   status=$(ubuntu_support_status "${VERSION_ID:-}")
 
-  say 'System and compatibility checks'
+  say 'System Information'
   kv 'Hostname' "$(uname -n)"
   kv 'OS' "$pretty"
   kv 'Kernel' "$kern"
@@ -209,6 +329,11 @@ preflight(){
   kv 'Memory' "${mem_gib} GiB"
   kv "Free disk ($target)" "${disk_avail} GiB"
   printf '\n'
+  say 'Listening ports (port/proto, exposure, service):'
+  list_open_ports
+  printf '\n'
+
+  say 'Compatibility checks'
 
   # Architecture -- hard requirement.
   if [[ $arch == x86_64 ]]; then
@@ -267,8 +392,8 @@ preflight(){
     warn 'Could not reach github.com:443; the installer needs outbound HTTPS'
   fi
 
-  printf '\n'
   if [[ $fails -gt 0 ]]; then
+    printf '\n'
     die "$fails compatibility check(s) failed. Resolve the items marked ! above. A version mismatch can be overridden with ALLOW_UNSUPPORTED_UBUNTU=1."
   fi
   ok 'All required checks passed'
@@ -278,27 +403,50 @@ trap 'warn "Installer exited at line $LINENO. Re-run it to resume; existing keys
 [[ -t 0 && -e /dev/tty ]] || die 'Run interactively from an SSH terminal: sudo bash opennhp-ubuntu-installer.sh'
 [[ $EUID == 0 ]] || die 'Run with sudo: sudo bash opennhp-ubuntu-installer.sh'
 source /etc/os-release
-# Honor OPENNHP_REF from the command line. A value saved by a previous run
-# is only the menu default, so a re-run still asks. Read it before an
-# uninstall deletes installer.env.
+
+# Honor OPENNHP_REF and PROTECTED_PORTS from the command line. A value saved
+# by a previous run is only the default, so a re-run still asks. Read them
+# before an uninstall deletes installer.env.
 PRESET_REF=${OPENNHP_REF-}
+PRESET_PORTS=${PROTECTED_PORTS-}
+PRESET_KNOCK=${KNOCK_PORT-}
 PREV_OTP=1
 PREV_DEMO=1
+PREV_PORTS=80
+PREV_KNOCK=62206
 script_version=$INSTALLER_VERSION
 if [[ -f $STATE ]]; then
   source "$STATE"
   PREV_OTP=${ENABLE_OTP:-1}
   PREV_DEMO=${INSTALL_DEMO:-1}
+  PREV_PORTS=${PROTECTED_PORTS:-80}
+  PREV_KNOCK=${KNOCK_PORT:-62206}
 fi
+# PROTECTED_PORTS is chosen below; the saved value is only the default.
+PROTECTED_PORTS=''
 # installer.env records the version that wrote it. Keep this script's version.
 INSTALLER_VERSION=$script_version
 
-say "OpenNHP installer ${INSTALLER_VERSION}"
+# The knock port is not hard-coded. Take it from the server's own config when
+# one is already installed, else a saved value, else the default; KNOCK_PORT in
+# the environment overrides. It feeds the server config and the reserved set,
+# so a protected port can never collide with the port knocks arrive on.
+KNOCK_PORT=$PREV_KNOCK
+if [[ -f "$SERVER/etc/config.toml" ]]; then
+  cfg_knock=$(sed -n 's/^[[:space:]]*ListenPort[[:space:]]*=[[:space:]]*\([0-9]\{1,5\}\).*/\1/p' "$SERVER/etc/config.toml" | head -n1)
+  [[ -n ${cfg_knock:-} ]] && KNOCK_PORT=$cfg_knock
+fi
+[[ -n $PRESET_KNOCK ]] && KNOCK_PORT=$PRESET_KNOCK
+if ! [[ $KNOCK_PORT =~ ^[0-9]+$ ]] || (( KNOCK_PORT < 1 || KNOCK_PORT > 65535 )); then
+  die "KNOCK_PORT must be a port number between 1 and 65535 (got '${KNOCK_PORT}')."
+fi
+# SSH and the knock port must never be placed behind NHP.
+RESERVED_PORTS="22 $KNOCK_PORT"
+
+header 'OpenNHP Installer For Ubuntu' "v${INSTALLER_VERSION}"
 preflight
-info 'Installs the OpenNHP server and access controller on this host.'
-info 'TCP 80 can be placed behind a knock. SSH and UDP 62206 stay open.'
-info 'Allow TCP 22 from your IP, and UDP 62206 plus TCP 80 from clients.'
-info 'Keep Session Manager or the serial console available before the firewall is turned on.'
+printf '\n'
+
 if opennhp_configured; then
   say 'This host already has OpenNHP'
   info '1  Install or update, and keep existing keys'
@@ -309,7 +457,7 @@ if opennhp_configured; then
     case $choice in
       1) break ;;
       2)
-        info 'This stops OpenNHP, deletes /opt/opennhp, and removes the TCP 80 guard.'
+        info 'This stops OpenNHP, deletes /opt/opennhp, and removes the NHP port guard.'
         info 'Private keys and trusted devices are deleted. This cannot be undone.'
         info 'NGINX, Go, and other firewall rules, including SSH, stay in place.'
         confirm 'Uninstall OpenNHP on this host?' || exit 0
@@ -324,9 +472,9 @@ else
   confirm 'Install OpenNHP on this host?' || exit 0
 fi
 
-say 'Choices'
-info 'The demo site is NGINX and a sample page on port 80. It replaces /var/www/html/index.html.'
-info 'Skip it when this host already serves its own site. TCP 80 can still be guarded.'
+say 'Demo website'
+info 'NGINX serves a sample page on TCP 80. It replaces /var/www/html/index.html.'
+info 'Skip it when this host already serves its own site; TCP 80 can still be guarded.'
 if prompt_bool 'Install the demo website' "$PREV_DEMO"; then
   INSTALL_DEMO=1
   ok 'Demo website will be installed'
@@ -334,8 +482,10 @@ else
   INSTALL_DEMO=0
   ok 'Demo website will be skipped'
 fi
-info 'One-time registration lets a device request a 6-digit code and register its own key.'
-info 'Until email is configured, that code is written to the server log.'
+
+say 'One-time registration'
+info 'Lets a device request a 6-digit code and register its own key.'
+info 'Until email is configured, the code is written to the server log.'
 if prompt_bool 'Enable one-time registration' "$PREV_OTP"; then
   ENABLE_OTP=1
   ok 'One-time registration will be enabled'
@@ -343,6 +493,26 @@ else
   ENABLE_OTP=0
   ok 'One-time registration will be left off'
 fi
+
+say 'Protected ports'
+info 'OpenNHP guards one or more TCP ports; new connections drop until a knock opens them.'
+info "SSH (22) and the knock port (${KNOCK_PORT}) are never guarded. The default is TCP 80."
+info 'Re-running the installer can change this set without touching keys or trusted agents.'
+if [[ -n $PRESET_PORTS ]]; then
+  if PROTECTED_PORTS=$(normalize_ports "$PRESET_PORTS"); then
+    ok "Using PROTECTED_PORTS=$PROTECTED_PORTS from the environment"
+  else
+    die "Invalid PROTECTED_PORTS=$PRESET_PORTS"
+  fi
+else
+  choose_ports "$PREV_PORTS"
+fi
+# The demo website binds TCP 80, so keep 80 guarded whenever it is installed.
+if [[ $INSTALL_DEMO == 1 ]] && ! ports_include 80 "$PROTECTED_PORTS"; then
+  PROTECTED_PORTS="80,$PROTECTED_PORTS"
+  info 'Added TCP 80 to the protected set because the demo website is installed.'
+fi
+ok "Protecting TCP ${PROTECTED_PORTS}"
 
 mkdir -p "$ROOT" "$SECRETS"
 chmod 700 "$ROOT" "$SECRETS"
@@ -588,7 +758,7 @@ cat > "$SERVER/etc/config.toml" <<EOF
 PrivateKeyBase64 = "$server_priv"
 DefaultCipherScheme = 0
 ListenIp = "0.0.0.0"
-ListenPort = 62206
+ListenPort = $KNOCK_PORT
 Hostname = "$public_ip"
 LogLevel = 4
 DisableAgentValidation = false
@@ -699,6 +869,19 @@ HttpListenPort = 443
 TLSCertFile = "cert/cert.pem"
 TLSKeyFile = "cert/cert.key"
 EOF
+# One backend per protected port, all under the "web" resource, so a single
+# knock opens every port the operator chose.
+web_backends=''
+IFS=, read -ra _ports <<< "$PROTECTED_PORTS"
+for _p in "${_ports[@]}"; do
+  web_backends+="[\"web\".Resources.\"web${_p}\"]"$'\n'
+  web_backends+="ACId = \"nhp-ac\""$'\n'
+  web_backends+="Hostname = \"${public_ip}\""$'\n'
+  web_backends+="Addr.Ip = \"${private_ip}\""$'\n'
+  web_backends+="Addr.Port = ${_p}"$'\n'
+  web_backends+="Addr.Protocol = \"tcp\""$'\n'
+  web_backends+="PortSuffix = false"$'\n'
+done
 cat > "$SERVER/plugins/example/etc/resource.toml" <<EOF
 ["web"]
 SkipAuth = true
@@ -706,14 +889,7 @@ OpenTime = 60
 RedirectUrl = ""
 RedirectWithParams = false
 CookieDomain = ""
-["web".Resources."website"]
-ACId = "nhp-ac"
-Hostname = "$public_ip"
-Addr.Ip = "$private_ip"
-Addr.Port = 80
-Addr.Protocol = "tcp"
-PortSuffix = false
-["web".ExInfo]
+${web_backends}["web".ExInfo]
 Title = "OpenNHP"
 EOF
 cat > "$SERVER/plugins/example/etc/config.toml" <<'EOF'
@@ -740,7 +916,7 @@ PubKeyBase64 = "$server_pub"
 ExpireTime = $TTL
 [[Servers.Instances]]
 Ip = "$private_ip"
-Port = 62206
+Port = $KNOCK_PORT
 EOF
 chmod 600 "$SERVER/etc/config.toml" "$AC/etc/config.toml"
 # The upstream AC build ships etc/remote.toml aimed at a lab etcd
@@ -764,7 +940,7 @@ PubKeyBase64 = "$server_pub"
 ExpireTime = $TTL
 [[Servers.Instances]]
 Ip = "$private_ip"
-Port = 62206
+Port = $KNOCK_PORT
 EOF
   cat > "$AGENT/etc/resource.toml" <<'EOF'
 [[Resources]]
@@ -827,6 +1003,16 @@ EOF
 cat > /usr/local/sbin/nhp-firewall-rules <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# The TCP ports this host places behind a knock, as a multiport list.
+PORTS="${PROTECTED_PORTS}"
+# Remove every INPUT jump into the OPENNHP chain, whatever ports it covers
+# (including a previous port set). start and stop both call this so the rules
+# always reconcile to the current PORTS -- ports no longer protected are dropped.
+drop_jumps(){
+  iptables -S INPUT 2>/dev/null | awk '/-j OPENNHP\$/{\$1="-D"; print}' | while read -r spec; do
+    iptables \$spec 2>/dev/null || true
+  done
+}
 case "\${1:-}" in
  start)
   ipset create defaultset hash:ip,port,ip timeout 120 -exist
@@ -838,10 +1024,11 @@ case "\${1:-}" in
   iptables -A OPENNHP -m set --match-set defaultset src,dst,dst -j ACCEPT
   iptables -A OPENNHP -m set --match-set tempset src,dst -j ACCEPT
   iptables -A OPENNHP -j DROP
-  iptables -C INPUT -p tcp --dport 80 -j OPENNHP 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 80 -j OPENNHP
+  drop_jumps
+  iptables -I INPUT 1 -p tcp -m multiport --dports "\$PORTS" -j OPENNHP
   ;;
  stop)
-  iptables -D INPUT -p tcp --dport 80 -j OPENNHP 2>/dev/null || true
+  drop_jumps
   iptables -F OPENNHP 2>/dev/null || true
   iptables -X OPENNHP 2>/dev/null || true
   ;;
@@ -884,19 +1071,19 @@ systemctl is-active --quiet nhp-server.service || die 'NHP server did not start.
 ok 'OpenNHP server is running'
 
 say 'Firewall'
-info 'Only new connections to TCP 80 are guarded. SSH and UDP 62206 are left as they are.'
+info "Only new connections to TCP ${PROTECTED_PORTS} are guarded. SSH and UDP ${KNOCK_PORT} are left as they are."
 info 'Existing firewall rules are not flushed.'
 info 'If you turn this on, it rolls back in 180 seconds unless you confirm SSH still works.'
-if confirm 'Protect TCP 80 and start the access controller now?'; then
-  # A temporary systemd timer removes the guarded rule if the SSH session drops.
+if confirm "Protect TCP ${PROTECTED_PORTS} and start the access controller now?"; then
+  # A temporary systemd timer removes the guarded rules if the SSH session drops.
   systemd-run --unit=nhp-rollback --on-active=180s /usr/local/sbin/nhp-firewall-rules stop >/dev/null
   systemctl restart nhp-firewall.service
   if ! systemctl restart nhp-ac.service; then
     systemctl stop nhp-firewall.service || true
-    die 'NHP AC failed; TCP/80 firewall rolled back. Check journalctl -u nhp-ac -n 100.'
+    die "NHP AC failed; TCP ${PROTECTED_PORTS} firewall rolled back. Check journalctl -u nhp-ac -n 100."
   fi
   systemctl is-active --quiet nhp-ac.service || die 'NHP AC is not running.'
-  warn 'TCP 80 is protected. The rule comes off in 180 seconds unless you keep it.'
+  warn "TCP ${PROTECTED_PORTS} is protected. The rules come off in 180 seconds unless you keep them."
   for unit in nhp-server nhp-ac nhp-firewall; do
     if systemctl is-active --quiet "$unit"; then
       ok "$unit is running"
@@ -904,23 +1091,24 @@ if confirm 'Protect TCP 80 and start the access controller now?'; then
       warn "$unit is not running"
     fi
   done
+  printf '\n'
   pause 'Press Enter after you confirm this SSH session still works...'
-  if confirm 'Keep TCP 80 protected on boot?'; then
+  if confirm "Keep TCP ${PROTECTED_PORTS} protected on boot?"; then
     systemctl stop nhp-rollback.timer 2>/dev/null || true
     systemctl reset-failed nhp-rollback.service 2>/dev/null || true
-    ok 'TCP 80 stays protected across reboots'
+    ok "TCP ${PROTECTED_PORTS} stays protected across reboots"
   else
     systemctl stop nhp-ac.service nhp-firewall.service || true
     systemctl stop nhp-rollback.timer 2>/dev/null || true
     systemctl disable nhp-ac.service nhp-firewall.service || true
-    warn 'TCP 80 is open again, including after a reboot.'
+    warn "TCP ${PROTECTED_PORTS} is open again, including after a reboot."
   fi
 else
   systemctl disable nhp-ac.service nhp-firewall.service || true
-  warn 'TCP 80 was left open.'
+  warn "TCP ${PROTECTED_PORTS} was left open."
 fi
 
-say 'Summary'
+header 'Installation summary'
 kv 'Installer' "$INSTALLER_VERSION"
 kv 'OpenNHP' "$OPENNHP_REF ($(git -C "$SRC" rev-parse --short HEAD))"
 kv 'Server key' "$server_pub"
@@ -931,8 +1119,9 @@ if [[ $INSTALL_DEMO == 1 ]]; then
 else
   kv 'Demo site' 'not installed'
 fi
-kv 'Knock' "$public_ip UDP 62206"
+kv 'Knock' "$public_ip UDP ${KNOCK_PORT}"
 kv 'Resource' 'example / web'
+kv 'Protected ports' "tcp ${PROTECTED_PORTS}"
 kv 'Open time' '60 seconds for new TCP connections'
 if [[ $ENABLE_OTP == 1 ]]; then
   kv 'Registration' 'one-time codes, written to the server log'
@@ -940,7 +1129,7 @@ else
   kv 'Registration' 'off'
 fi
 kv 'Secrets' "$SECRETS"
-info 'Allow UDP 62206 and TCP 80 from clients. Limit SSH to your IP.'
+info "Allow UDP ${KNOCK_PORT} and TCP ${PROTECTED_PORTS} from clients. Limit SSH to your IP."
 info 'Copy the server public key into the client. Leave private keys on this host.'
 if [[ $ENABLE_OTP == 1 ]]; then
   info "Codes are logged in $SERVER/logs/server-YYYY-MM-DD.log as OTP CODE."

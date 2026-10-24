@@ -1,6 +1,6 @@
 # OpenNHP Ubuntu installer
 
-**Version 1.0.7** (2026-10-24)
+**Version 1.0.8** (2026-10-24)
 
 `opennhp-ubuntu-installer.sh` installs [OpenNHP](https://github.com/OpenNHP/opennhp) on one supported Ubuntu LTS server (24.04 is the baseline; 22.04 and 26.04 also work — see [Supported Ubuntu versions](#supported-ubuntu-versions)). `opennhp-manage-agents.sh` adds or removes trusted devices after install. Both scripts live in [OpenNHP-Ubuntu-Installer](https://github.com/OpenNHP/OpenNHP-Ubuntu-Installer). They use the same version number. When either script changes, raise `INSTALLER_VERSION` in both files and add a [Changelog](#changelog) entry.
 
@@ -43,13 +43,39 @@ Two programs run on the same host. A demo website is optional.
 | --- | --- | --- |
 | NHP server | `nhp-serverd` | Listens on UDP port 62206. A device "knocks" here. The server decides whether that device may open the site. |
 | Access controller | `nhp-acd` | Turns an approved knock into a short opening in the firewall. |
-| Demo website | NGINX | Optional. Serves a sample page on TCP port 80. This is the only port the installer hides. Skip it when the host already has a site. |
+| Demo website | NGINX | Optional. Serves a sample page on TCP port 80. Skip it when the host already has a site. |
 
 A knock is a small encrypted packet from a trusted device. Until that knock succeeds, new visitors cannot open the website. SSH (TCP port 22) and the knock port stay open. The installer does not flush the rest of the firewall.
 
 The installer asks which OpenNHP release to build. Press Enter to use the latest published release. Older releases are listed too. Use [react-native-opennhp](https://github.com/justingreerbbi/react-native-opennhp) for an iOS or Android app.
 
 The phone or other client should be on a different network from the EC2 instance. A test started on the instance itself uses the private address, so it does not prove the public path works.
+
+## Choose which ports to protect
+
+The installer asks which TCP ports OpenNHP should guard. Enter one or more ports, separated by spaces or commas. Press Enter to accept the default of **80**.
+
+```text
+TCP ports to protect, space or comma separated [80]: 80,443,8080
+```
+
+| Rule | Behavior |
+| --- | --- |
+| Default | TCP 80 when nothing else is given. |
+| Multiple ports | Any mix, e.g. `80,443,8080` (up to 15). Duplicates are ignored. |
+| Reserved | SSH (22) and the knock port (62206 by default, or `KNOCK_PORT`) are rejected, so you cannot lock yourself out. |
+| Demo site | When the demo website is installed, TCP 80 is added automatically. |
+| Scope | TCP only for now. UDP application ports may come later. |
+
+Each guarded port drops new connections until a successful knock opens it for the knocking device. SSH, the knock port, and any host firewall or cloud security group rules you set yourself are left untouched — those decide which ports are *reachable*, while OpenNHP decides which reachable ports open only after a knock.
+
+Set the ports without being prompted with the `PROTECTED_PORTS` environment variable:
+
+```bash
+sudo PROTECTED_PORTS=80,443 bash opennhp-ubuntu-installer.sh
+```
+
+**Reconfigure later.** Run the installer again and choose option 1 (install or update). Your saved ports are offered as the default; enter a new set to change them. Keys and trusted devices are kept, and firewall rules for ports you drop are removed automatically. The same 180-second rollback protects the change: if you do not confirm that SSH still works, the guard is removed.
 
 ## Start the EC2 instance
 
@@ -64,9 +90,9 @@ The phone or other client should be on a different network from the EC2 instance
        | --- | --- | --- |
        | SSH | TCP 22 | Your IP only |
        | Custom UDP | 62206 | The phones or networks that will knock |
-       | HTTP | TCP 80 | Those same clients |
+       | Protected ports | TCP (the ports you choose, e.g. 80, 443) | Those same clients |
    ```
-   The installer cannot change this security group. If these ports are closed in AWS, the instance never sees the traffic.
+   The installer cannot change this security group. Open the TCP ports you plan to protect here; if they are closed in AWS, the instance never sees the traffic. The security group decides which ports are reachable, while OpenNHP decides which of those open only after a knock.
    ```
 7. Leave the disk at the default size and launch the instance.
 8. Wait until the instance is **Running** and the status checks pass. Copy the public IPv4 address.
@@ -152,6 +178,8 @@ Optional settings, placed on the same command:
 | `GO_VERSION` | `1.26.0` | Go release installed under `/usr/local/go` when that exact version is missing. |
 | `PUBLIC_IP` | Detected from `https://checkip.amazonaws.com` | Address clients should knock. You still confirm it. A DNS name is allowed. |
 | `OPENNHP_REF` | Asked during install | Skip the release menu. Example: `OPENNHP_REF=v1.0.2`. |
+| `PROTECTED_PORTS` | Asked during install | Skip the port prompt. A space- or comma-separated TCP port list, e.g. `PROTECTED_PORTS=80,443`. SSH (22) and the knock port are rejected. |
+| `KNOCK_PORT` | `62206` (or the installed server's value) | UDP port the NHP server listens on for knocks. Feeds the server config and the reserved set. Example: `KNOCK_PORT=62207`. |
 | `ALLOW_UNSUPPORTED_UBUNTU` | `0` | Set to `1` to bypass the Ubuntu version check and install on an unsupported release at your own risk. The other checks still apply. |
 
 ```bash
@@ -325,6 +353,15 @@ The firewall allows an existing connection to finish, allows a device that just 
 
 `INSTALLER_VERSION` is printed at startup and stored in `/opt/opennhp/installer.env`.
 
+### 1.0.8 — 2026-10-24
+
+- You can now choose which TCP ports OpenNHP protects, instead of only TCP 80. Enter one or more ports at install time (default 80); SSH (22) and the knock port are rejected. Set `PROTECTED_PORTS` to skip the prompt. See [Choose which ports to protect](#choose-which-ports-to-protect).
+- The knock port is no longer hard-coded. It comes from the installed server's config (or `KNOCK_PORT`, default 62206) and feeds both the server configuration and the reserved-port set, so the reserved port always matches the port knocks actually arrive on.
+- Re-running the installer can change the protected ports without resetting keys or trusted devices. Firewall rules for ports no longer protected are removed automatically, and the 180-second rollback still applies.
+- The generated firewall rules now use a single multiport rule and reconcile themselves on each start/stop, so stale port rules are cleaned up.
+- Refreshed the command-line interface of both scripts: a ruled banner, consistent section headers, aligned status lines, and a cleaner summary. Set `NO_COLOR=1` for plain output.
+- The startup system summary now lists the listening ports (TCP and UDP, with protocol shown), the service on each, and whether each is exposed (public — all interfaces or a routable address), private (a LAN/VPC address), or internal (loopback only), so you can see what is already running before choosing which ports to protect. Exposure reflects the bind address; the firewall and security group still decide reachability.
+
 ### 1.0.7 — 2026-10-24
 
 - Expanded Ubuntu support beyond 24.04. Supported LTS releases are now 22.04 (deprecated), 24.04 (primary baseline), and 26.04. Unsupported releases are rejected unless `ALLOW_UNSUPPORTED_UBUNTU=1` is set. See [Supported Ubuntu versions](#supported-ubuntu-versions).
@@ -384,7 +421,7 @@ First tracked release.
 
 - This is not a production install out of the box. Configure production separately, or open a pull request that adds that path.
 - The installer does not configure the EC2 security group, IAM, or Session Manager.
-- It does not open SSH, the knock port, or any port other than TCP 80 in the host firewall.
+- It guards only the TCP ports you choose; it does not open SSH, the knock port, or any other port in the host firewall.
 - A trusted device is allowed to open the `web` resource without a separate password.
 - A normal re-run keeps keys in `/opt/opennhp/secrets`. Choose uninstall at the start when those keys, trusted devices, and firewall rules should be deleted.
 - It does not build for ARM, for non-LTS or otherwise unsupported Ubuntu versions, or for hosts that have a global IPv6 address.

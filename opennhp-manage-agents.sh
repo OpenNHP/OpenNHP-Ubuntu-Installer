@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 
 # Keep this in sync with opennhp-ubuntu-installer.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.7
+INSTALLER_VERSION=1.0.8
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   printf 'opennhp-manage-agents.sh %s\n' "$INSTALLER_VERSION"
   exit 0
@@ -18,11 +18,29 @@ SECRETS="$ROOT/secrets"
 SERVER_CONFIG="$ROOT/source/release/nhp-server/etc/config.toml"
 TTL=1924991999
 
-say(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
-ok(){ printf '  \033[32m[COMPLETE]\033[0m %s\n' "$*"; }
-warn(){ printf '  \033[33m[NOTE]\033[0m %s\n' "$*"; }
-die(){ printf '\n[ERROR] %s\n' "$*" >&2; exit 1; }
-ask(){ local v; read -r -p "$1" v </dev/tty; printf '%s' "$v"; }
+# ---- Interface -------------------------------------------------------------
+# Presentation only; matches opennhp-ubuntu-installer.sh. Colors fall back to
+# plain text when output is not a terminal or NO_COLOR is set.
+if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+else
+  BOLD=''; DIM=''; RED=''; GREEN=''; YELLOW=''; CYAN=''; RESET=''
+fi
+_cols(){ local w; w=$(tput cols 2>/dev/null || echo 72); (( w > 72 )) && w=72 || true; (( w < 40 )) && w=40 || true; printf '%s' "$w"; }
+_rule(){ local w; w=$(_cols); printf '%s' "$1"; printf '─%.0s' $(seq "$w"); printf '%s\n' "$RESET"; }
+header(){
+  printf '\n'; _rule "$CYAN"
+  printf ' %s%s%s' "$BOLD" "$1" "$RESET"
+  [[ -n ${2:-} ]] && printf '  %s%s%s' "$DIM" "$2" "$RESET"
+  printf '\n'; _rule "$CYAN"
+}
+say(){ printf '\n%s%s%s\n%s' "${BOLD}${CYAN}" "$1" "$RESET" "$DIM"; printf '─%.0s' $(seq "${#1}"); printf '%s\n' "$RESET"; }
+info(){ printf '  %s\n' "$*"; }
+ok(){ printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn(){ printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
+die(){ printf '\n  %s✗ Error:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+ask(){ local v; read -r -p "  ${CYAN}❯${RESET} $1" v </dev/tty; printf '%s' "$v"; }
 confirm(){ local v; v=$(ask "$1 [y/N]: "); [[ ${v,,} == y || ${v,,} == yes ]]; }
 
 [[ $EUID == 0 ]] || die 'Run with sudo: sudo bash opennhp-manage-agents.sh'
@@ -147,11 +165,12 @@ def public_key_from_user_text(text):
 def cmd_list():
     agents = load_agents()
     if not agents:
-        print('No trusted clients.')
+        print('  No trusted agents yet.')
         return
+    width = max((len(e['name'] or '(unnamed)') for e in agents), default=0)
     for entry in agents:
         label = entry['name'] or '(unnamed)'
-        print(f"{label}\t{entry['publicKey']}")
+        print(f"  {label:<{width}}  {entry['publicKey']}")
 
 def cmd_add(name, public_key):
     name = name.strip()
@@ -172,14 +191,15 @@ def cmd_add(name, public_key):
             raise SystemExit(f'That public key is already trusted ({label}).')
     agents.append({'name': name, 'publicKey': public_key})
     write_agents(agents)
-    print(f'ADDED\t{name}\t{public_key}')
+    print(f'  Added agent "{name}"')
+    print(f'    public key   {public_key}')
     server_key = server_pubkey()
     host = hostname()
     if server_key:
-        print(f'SERVER_PUB\t{server_key}')
+        print(f'    server key   {server_key}')
     if host:
-        print(f'KNOCK\t{host} UDP/62206')
-    print('RESOURCE\texample\tweb')
+        print(f'    knock        {host} UDP/62206')
+    print('    resource     example / web')
 
 def cmd_remove(selector):
     selector = selector.strip()
@@ -201,7 +221,8 @@ def cmd_remove(selector):
         raise SystemExit(f'No trusted client matches {selector!r}.')
     write_agents(kept)
     label = removed['name'] or '(unnamed)'
-    print(f"REMOVED\t{label}\t{removed['publicKey']}")
+    print(f'  Removed agent "{label}"')
+    print(f'    public key   {removed["publicKey"]}')
 
 if command == 'list':
     cmd_list()
@@ -277,8 +298,10 @@ fi
 
 if [[ -z $action ]]; then
   [[ -t 0 && -e /dev/tty ]] || die 'Run interactively, or pass --name and --public-key, --list, or --remove.'
+  header 'OpenNHP Agent Manager' "v${INSTALLER_VERSION}"
   say 'Manage trusted agents'
-  printf '  1) Add an agent\n  2) Remove an agent\n'
+  info '1) Add an agent'
+  info '2) Remove an agent'
   while [[ -z $action ]]; do
     choice=$(ask 'Choose 1 or 2: ')
     case ${choice,,} in
@@ -291,41 +314,43 @@ fi
 
 if [[ $action == remove ]]; then
   say 'Remove an agent'
-  say 'Step 1 — Choose the agent'
-  printf '  These public keys are trusted now:\n\n'
+  info 'These agents are trusted now:'
+  printf '\n'
   python3 "$worker" "$AGENT_TOML" "$REGISTRY" "$SECRETS" "$SERVER_CONFIG" "$TTL" list
   printf '\n'
   if [[ -z $selector ]]; then
     selector=$(ask 'Agent name or public key to remove: ')
   fi
   [[ -n $selector ]] || die 'No agent selected.'
-  say 'Step 2 — Confirm'
+  printf '\n'
   confirm "Remove trusted agent '$selector'?" || exit 0
+  printf '\n'
   python3 "$worker" "$AGENT_TOML" "$REGISTRY" "$SECRETS" "$SERVER_CONFIG" "$TTL" remove "$selector"
   ok 'Agent removed. The NHP server reloads agent.toml on its own.'
   exit 0
 fi
 
 say 'Add an agent'
-printf '  The agent keeps its private key. This server stores only the public key.\n'
+info 'The agent keeps its private key. This server stores only the public key.'
 if [[ -z $name ]]; then
   [[ -t 0 && -e /dev/tty ]] || die 'Pass --name and --public-key, or run the script in a terminal.'
-  say 'Step 1 — Name the agent'
-  printf '  Use a short label you will recognize later, such as the device name.\n'
+  info 'Use a short label you will recognize later, such as the device name.'
   name=$(ask 'Agent name: ')
 fi
 if [[ -z $public_key ]]; then
   [[ -t 0 && -e /dev/tty ]] || die 'Pass --public-key, or run the script in a terminal.'
-  say 'Step 2 — Paste the public key'
-  printf '  Paste the base64 public key from the agent.\n'
-  printf '  A JSON object with a publicKey field is also accepted. A private key in that JSON is ignored.\n'
+  printf '\n'
+  info 'Paste the base64 public key from the agent.'
+  info 'A JSON object with a publicKey field is also accepted. A private key in that JSON is ignored.'
   public_key=$(ask 'Public key: ')
 fi
 [[ -n $name && -n $public_key ]] || die 'An agent name and public key are required.'
 if [[ -t 0 && -e /dev/tty ]]; then
-  say 'Step 3 — Confirm'
+  printf '\n'
   confirm "Add agent '$name'?" || exit 0
 fi
+
+printf '\n'
 
 python3 "$worker" "$AGENT_TOML" "$REGISTRY" "$SECRETS" "$SERVER_CONFIG" "$TTL" add "$name" "$public_key"
 if systemctl is-active --quiet nhp-server 2>/dev/null; then
