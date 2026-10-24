@@ -75,7 +75,7 @@ normalize_ports(){
     [[ $tok =~ ^[0-9]+$ ]] || { echo "Not a number: '$tok'" >&2; return 1; }
     p=$((10#$tok))
     (( p >= 1 && p <= 65535 )) || { echo "Port out of range (1-65535): $tok" >&2; return 1; }
-    [[ " $RESERVED_PORTS " == *" $p "* ]] && { echo "Port $p is reserved; SSH (22) and the knock port (62206) must stay reachable" >&2; return 1; }
+    [[ " $RESERVED_PORTS " == *" $p "* ]] && { echo "Port $p is reserved; SSH (22) and the knock port (${KNOCK_PORT:-62206}) must stay reachable" >&2; return 1; }
     [[ $seen == *" $p "* ]] && continue
     seen+="$p "
     out+=("$p")
@@ -98,7 +98,7 @@ choose_ports(){
       PROTECTED_PORTS=$norm
       return 0
     fi
-    info 'Enter one or more TCP ports (1-65535). 22 and 62206 are not allowed.'
+    info "Enter one or more TCP ports (1-65535). 22 and the knock port (${KNOCK_PORT:-62206}) are not allowed."
   done
 }
 # Hide a long command. On failure, show the tail of its output and stop.
@@ -228,6 +228,7 @@ save_state(){
     [[ -n ${ENABLE_OTP:-} ]] && printf 'ENABLE_OTP=%q\n' "$ENABLE_OTP"
     [[ -n ${INSTALL_DEMO:-} ]] && printf 'INSTALL_DEMO=%q\n' "$INSTALL_DEMO"
     [[ -n ${PROTECTED_PORTS:-} ]] && printf 'PROTECTED_PORTS=%q\n' "$PROTECTED_PORTS"
+    [[ -n ${KNOCK_PORT:-} ]] && printf 'KNOCK_PORT=%q\n' "$KNOCK_PORT"
   } > "$STATE"
   chmod 600 "$STATE"
 }
@@ -243,6 +244,63 @@ ubuntu_support_status(){
     22.04) printf 'deprecated' ;;
     *)     printf 'unsupported' ;;
   esac
+}
+# Classify a listening socket's bind address by how exposed it is:
+#   internal  loopback only (reachable just from this host)
+#   private   a specific LAN/VPC address (RFC1918, link-local, or IPv6 ULA)
+#   public    all interfaces (0.0.0.0 / ::) or a routable address
+_bind_scope(){
+  local h=$1
+  h=${h#\[}; h=${h%\]}; h=${h%%\%*}
+  case $h in
+    0.0.0.0|'*'|''|::) echo public ;;
+    127.*|::1) echo internal ;;
+    10.*|192.168.*|169.254.*) echo private ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) echo private ;;
+    fe80:*|fc[0-9a-f][0-9a-f]:*|fd[0-9a-f][0-9a-f]:*) echo private ;;
+    *) echo public ;;
+  esac
+}
+# List listening TCP ports with the service and exposure of each, so the
+# operator can see what is already running, and how reachable it is, before
+# choosing which ports to protect. Needs root (already checked) for names.
+list_open_ports(){
+  command -v ss >/dev/null 2>&1 || { info 'ss is not available; skipping the open-port list.'; return 0; }
+  declare -A proc_of=() scope_of=()
+  local proto state rq sq laddr peer rest port proc host scope rank oldrank key k tag color
+  # Scan TCP and UDP listeners separately; the knock arrives on UDP, so a
+  # UDP-only service (nhp-serverd) must not be hidden behind a TCP entry.
+  for proto in tcp udp; do
+    while read -r state rq sq laddr peer rest; do
+      [[ -n $laddr ]] || continue
+      port=${laddr##*:}
+      [[ $port =~ ^[0-9]+$ ]] || continue
+      host=${laddr%:*}
+      scope=$(_bind_scope "$host")
+      proc=$(sed -n 's/.*users:((\"\([^"]*\)\".*/\1/p' <<<"$rest")
+      [[ -n $proc ]] || proc='-'
+      key="$port/$proto"
+      [[ -n ${proc_of[$key]:-} ]] || proc_of[$key]=$proc
+      # Keep the most-exposed scope seen for a port (public > private > internal).
+      case $scope in public) rank=3 ;; private) rank=2 ;; *) rank=1 ;; esac
+      case ${scope_of[$key]:-} in public) oldrank=3 ;; private) oldrank=2 ;; internal) oldrank=1 ;; *) oldrank=0 ;; esac
+      if (( rank > oldrank )); then scope_of[$key]=$scope; fi
+    done < <(if [[ $proto == tcp ]]; then ss -H -tlnp 2>/dev/null; else ss -H -ulnp 2>/dev/null; fi)
+  done
+  if (( ${#proc_of[@]} == 0 )); then
+    info 'No listening ports detected.'
+    return 0
+  fi
+  for k in $(printf '%s\n' "${!proc_of[@]}" | sort -t/ -k1,1n -k2,2); do
+    port=${k%/*}; proto=${k#*/}
+    scope=${scope_of[$k]}
+    case $scope in
+      public)  color=$YELLOW; tag='public' ;;
+      private) color=$CYAN;   tag='private' ;;
+      *)       color=$DIM;    tag='internal' ;;
+    esac
+    printf '  %s%-11s%s %s%-8s%s %s\n' "$DIM" "${port}/${proto}" "$RESET" "$color" "$tag" "$RESET" "${proc_of[$k]}"
+  done
 }
 # Gather host facts, print a system summary, then run the compatibility
 # checks. Hard requirements (architecture, a supported Ubuntu release,
@@ -262,7 +320,7 @@ preflight(){
   [[ -n $disk_avail ]] || disk_avail='?'
   status=$(ubuntu_support_status "${VERSION_ID:-}")
 
-  say 'System and compatibility checks'
+  say 'System Information'
   kv 'Hostname' "$(uname -n)"
   kv 'OS' "$pretty"
   kv 'Kernel' "$kern"
@@ -271,6 +329,11 @@ preflight(){
   kv 'Memory' "${mem_gib} GiB"
   kv "Free disk ($target)" "${disk_avail} GiB"
   printf '\n'
+  say 'Listening ports (port/proto, exposure, service):'
+  list_open_ports
+  printf '\n'
+
+  say 'Compatibility checks'
 
   # Architecture -- hard requirement.
   if [[ $arch == x86_64 ]]; then
@@ -329,8 +392,8 @@ preflight(){
     warn 'Could not reach github.com:443; the installer needs outbound HTTPS'
   fi
 
-  printf '\n'
   if [[ $fails -gt 0 ]]; then
+    printf '\n'
     die "$fails compatibility check(s) failed. Resolve the items marked ! above. A version mismatch can be overridden with ALLOW_UNSUPPORTED_UBUNTU=1."
   fi
   ok 'All required checks passed'
@@ -340,32 +403,50 @@ trap 'warn "Installer exited at line $LINENO. Re-run it to resume; existing keys
 [[ -t 0 && -e /dev/tty ]] || die 'Run interactively from an SSH terminal: sudo bash opennhp-ubuntu-installer.sh'
 [[ $EUID == 0 ]] || die 'Run with sudo: sudo bash opennhp-ubuntu-installer.sh'
 source /etc/os-release
+
 # Honor OPENNHP_REF and PROTECTED_PORTS from the command line. A value saved
 # by a previous run is only the default, so a re-run still asks. Read them
 # before an uninstall deletes installer.env.
 PRESET_REF=${OPENNHP_REF-}
 PRESET_PORTS=${PROTECTED_PORTS-}
+PRESET_KNOCK=${KNOCK_PORT-}
 PREV_OTP=1
 PREV_DEMO=1
 PREV_PORTS=80
+PREV_KNOCK=62206
 script_version=$INSTALLER_VERSION
 if [[ -f $STATE ]]; then
   source "$STATE"
   PREV_OTP=${ENABLE_OTP:-1}
   PREV_DEMO=${INSTALL_DEMO:-1}
   PREV_PORTS=${PROTECTED_PORTS:-80}
+  PREV_KNOCK=${KNOCK_PORT:-62206}
 fi
 # PROTECTED_PORTS is chosen below; the saved value is only the default.
 PROTECTED_PORTS=''
 # installer.env records the version that wrote it. Keep this script's version.
 INSTALLER_VERSION=$script_version
 
-header 'OpenNHP Installer' "v${INSTALLER_VERSION}"
+# The knock port is not hard-coded. Take it from the server's own config when
+# one is already installed, else a saved value, else the default; KNOCK_PORT in
+# the environment overrides. It feeds the server config and the reserved set,
+# so a protected port can never collide with the port knocks arrive on.
+KNOCK_PORT=$PREV_KNOCK
+if [[ -f "$SERVER/etc/config.toml" ]]; then
+  cfg_knock=$(sed -n 's/^[[:space:]]*ListenPort[[:space:]]*=[[:space:]]*\([0-9]\{1,5\}\).*/\1/p' "$SERVER/etc/config.toml" | head -n1)
+  [[ -n ${cfg_knock:-} ]] && KNOCK_PORT=$cfg_knock
+fi
+[[ -n $PRESET_KNOCK ]] && KNOCK_PORT=$PRESET_KNOCK
+if ! [[ $KNOCK_PORT =~ ^[0-9]+$ ]] || (( KNOCK_PORT < 1 || KNOCK_PORT > 65535 )); then
+  die "KNOCK_PORT must be a port number between 1 and 65535 (got '${KNOCK_PORT}')."
+fi
+# SSH and the knock port must never be placed behind NHP.
+RESERVED_PORTS="22 $KNOCK_PORT"
+
+header 'OpenNHP Installer For Ubuntu' "v${INSTALLER_VERSION}"
 preflight
-info 'Installs the OpenNHP server and access controller on this host.'
-info 'You choose which TCP ports to place behind a knock. SSH and UDP 62206 stay open.'
-info 'Allow TCP 22 from your IP, and UDP 62206 plus your protected ports from clients.'
-info 'Keep Session Manager or the serial console available before the firewall is turned on.'
+printf '\n'
+
 if opennhp_configured; then
   say 'This host already has OpenNHP'
   info '1  Install or update, and keep existing keys'
@@ -415,7 +496,7 @@ fi
 
 say 'Protected ports'
 info 'OpenNHP guards one or more TCP ports; new connections drop until a knock opens them.'
-info 'SSH (22) and the knock port (62206) are never guarded. The default is TCP 80.'
+info "SSH (22) and the knock port (${KNOCK_PORT}) are never guarded. The default is TCP 80."
 info 'Re-running the installer can change this set without touching keys or trusted agents.'
 if [[ -n $PRESET_PORTS ]]; then
   if PROTECTED_PORTS=$(normalize_ports "$PRESET_PORTS"); then
@@ -677,7 +758,7 @@ cat > "$SERVER/etc/config.toml" <<EOF
 PrivateKeyBase64 = "$server_priv"
 DefaultCipherScheme = 0
 ListenIp = "0.0.0.0"
-ListenPort = 62206
+ListenPort = $KNOCK_PORT
 Hostname = "$public_ip"
 LogLevel = 4
 DisableAgentValidation = false
@@ -835,7 +916,7 @@ PubKeyBase64 = "$server_pub"
 ExpireTime = $TTL
 [[Servers.Instances]]
 Ip = "$private_ip"
-Port = 62206
+Port = $KNOCK_PORT
 EOF
 chmod 600 "$SERVER/etc/config.toml" "$AC/etc/config.toml"
 # The upstream AC build ships etc/remote.toml aimed at a lab etcd
@@ -859,7 +940,7 @@ PubKeyBase64 = "$server_pub"
 ExpireTime = $TTL
 [[Servers.Instances]]
 Ip = "$private_ip"
-Port = 62206
+Port = $KNOCK_PORT
 EOF
   cat > "$AGENT/etc/resource.toml" <<'EOF'
 [[Resources]]
@@ -990,7 +1071,7 @@ systemctl is-active --quiet nhp-server.service || die 'NHP server did not start.
 ok 'OpenNHP server is running'
 
 say 'Firewall'
-info "Only new connections to TCP ${PROTECTED_PORTS} are guarded. SSH and UDP 62206 are left as they are."
+info "Only new connections to TCP ${PROTECTED_PORTS} are guarded. SSH and UDP ${KNOCK_PORT} are left as they are."
 info 'Existing firewall rules are not flushed.'
 info 'If you turn this on, it rolls back in 180 seconds unless you confirm SSH still works.'
 if confirm "Protect TCP ${PROTECTED_PORTS} and start the access controller now?"; then
@@ -1038,7 +1119,7 @@ if [[ $INSTALL_DEMO == 1 ]]; then
 else
   kv 'Demo site' 'not installed'
 fi
-kv 'Knock' "$public_ip UDP 62206"
+kv 'Knock' "$public_ip UDP ${KNOCK_PORT}"
 kv 'Resource' 'example / web'
 kv 'Protected ports' "tcp ${PROTECTED_PORTS}"
 kv 'Open time' '60 seconds for new TCP connections'
@@ -1048,7 +1129,7 @@ else
   kv 'Registration' 'off'
 fi
 kv 'Secrets' "$SECRETS"
-info "Allow UDP 62206 and TCP ${PROTECTED_PORTS} from clients. Limit SSH to your IP."
+info "Allow UDP ${KNOCK_PORT} and TCP ${PROTECTED_PORTS} from clients. Limit SSH to your IP."
 info 'Copy the server public key into the client. Leave private keys on this host.'
 if [[ $ENABLE_OTP == 1 ]]; then
   info "Codes are logged in $SERVER/logs/server-YYYY-MM-DD.log as OTP CODE."
