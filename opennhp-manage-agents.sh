@@ -4,10 +4,10 @@
 set -Eeuo pipefail
 umask 077
 
-# Keep this in sync with nhp-linux-installer.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.5
+# Keep this in sync with opennhp-ubuntu-installer.sh and the changelog in README.md.
+INSTALLER_VERSION=1.0.6
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
-  printf 'nhp-manage-agents.sh %s\n' "$INSTALLER_VERSION"
+  printf 'opennhp-manage-agents.sh %s\n' "$INSTALLER_VERSION"
   exit 0
 fi
 
@@ -25,8 +25,8 @@ die(){ printf '\n[ERROR] %s\n' "$*" >&2; exit 1; }
 ask(){ local v; read -r -p "$1" v </dev/tty; printf '%s' "$v"; }
 confirm(){ local v; v=$(ask "$1 [y/N]: "); [[ ${v,,} == y || ${v,,} == yes ]]; }
 
-[[ $EUID == 0 ]] || die 'Run with sudo: sudo bash nhp-manage-agents.sh'
-[[ -f $AGENT_TOML ]] || die "No server agent list at $AGENT_TOML. Run nhp-linux-installer.sh first."
+[[ $EUID == 0 ]] || die 'Run with sudo: sudo bash opennhp-manage-agents.sh'
+[[ -f $AGENT_TOML ]] || die "No server agent list at $AGENT_TOML. Run opennhp-ubuntu-installer.sh first."
 
 worker=$(mktemp "$ROOT/.manage-agents.XXXXXX")
 cat >"$worker" <<'PY'
@@ -222,14 +222,14 @@ trap cleanup EXIT
 
 usage(){
   cat <<EOF
-nhp-manage-agents.sh ${INSTALLER_VERSION}
+opennhp-manage-agents.sh ${INSTALLER_VERSION}
 
 Usage:
-  sudo bash nhp-manage-agents.sh
-  sudo bash nhp-manage-agents.sh --name NAME --public-key PUBLIC_KEY
-  sudo bash nhp-manage-agents.sh --list
-  sudo bash nhp-manage-agents.sh --remove NAME_OR_PUBLIC_KEY
-  bash nhp-manage-agents.sh --version
+  sudo bash opennhp-manage-agents.sh
+  sudo bash opennhp-manage-agents.sh --name NAME --public-key PUBLIC_KEY
+  sudo bash opennhp-manage-agents.sh --list
+  sudo bash opennhp-manage-agents.sh --remove NAME_OR_PUBLIC_KEY
+  bash opennhp-manage-agents.sh --version
 
 With no arguments, the script asks whether to add or remove an agent and walks through that choice.
 The public key is the base64 Curve25519 key from the agent.

@@ -1,12 +1,12 @@
 # OpenNHP Ubuntu installer
 
-**Version 1.0.5** (2026-10-22)
+**Version 1.0.6** (2026-10-23)
 
-`nhp-linux-installer.sh` installs [OpenNHP](https://github.com/OpenNHP/opennhp) on one Ubuntu 24.04 server. `nhp-manage-agents.sh` adds or removes trusted devices after install. Both scripts live in [OpenNHP-Ubuntu-Installer](https://github.com/justingreerbbi/OpenNHP-Ubuntu-Installer). They use the same version number. When either script changes, raise `INSTALLER_VERSION` in both files and add a [Changelog](#changelog) entry.
+`opennhp-ubuntu-installer.sh` installs [OpenNHP](https://github.com/OpenNHP/opennhp) on one Ubuntu 24.04 server. `opennhp-manage-agents.sh` adds or removes trusted devices after install. Both scripts live in [OpenNHP-Ubuntu-Installer](https://github.com/OpenNHP/OpenNHP-Ubuntu-Installer). They use the same version number. When either script changes, raise `INSTALLER_VERSION` in both files and add a [Changelog](#changelog) entry.
 
 ```bash
-bash nhp-linux-installer.sh --version
-bash nhp-manage-agents.sh --version
+bash opennhp-ubuntu-installer.sh --version
+bash opennhp-manage-agents.sh --version
 ```
 
 ## Not a production install
@@ -39,13 +39,15 @@ The phone or other client should be on a different network from the EC2 instance
 4. Create or select a key pair. Download the private key. You need it to sign in.
 5. Use a subnet that assigns a public IPv4 address. Leave public IPv6 off. The installer stops if the host has a global IPv6 address.
 6. Create a security group with these inbound rules:
-   | Type | Port | Source |
-      | --- | --- | --- |
-      | SSH | TCP 22 | Your IP only |
-      | Custom UDP | 62206 | The phones or networks that will knock |
-      | HTTP | TCP 80 | Those same clients |
 
-      The installer cannot change this security group. If these ports are closed in AWS, the instance never sees the traffic.
+   | Type | Port | Source |
+       | --- | --- | --- |
+       | SSH | TCP 22 | Your IP only |
+       | Custom UDP | 62206 | The phones or networks that will knock |
+       | HTTP | TCP 80 | Those same clients |
+   ```
+   The installer cannot change this security group. If these ports are closed in AWS, the instance never sees the traffic.
+   ```
 7. Leave the disk at the default size and launch the instance.
 8. Wait until the instance is **Running** and the status checks pass. Copy the public IPv4 address.
 
@@ -84,17 +86,17 @@ cd OpenNHP-Ubuntu-Installer
 From the project directory on your computer, with the SSH session closed or from a second terminal:
 
 ```bash
-scp -i /path/to/your-key.pem nhp-linux-installer.sh nhp-manage-agents.sh ubuntu@PUBLIC_IP:
+scp -i /path/to/your-key.pem opennhp-ubuntu-installer.sh opennhp-manage-agents.sh ubuntu@PUBLIC_IP:
 ```
 
 The files land in `/home/ubuntu/`. Sign in again and run the installer from that directory.
 
 ## Run the installer
 
-Run it from the directory that contains `nhp-linux-installer.sh`. It must be an interactive SSH session. Prompts are read from the terminal, so a piped or non-interactive run exits immediately.
+Run it from the directory that contains `opennhp-ubuntu-installer.sh`. It must be an interactive SSH session. Prompts are read from the terminal, so a piped or non-interactive run exits immediately.
 
 ```bash
-sudo bash nhp-linux-installer.sh
+sudo bash opennhp-ubuntu-installer.sh
 ```
 
 Answer `y` at the first prompt to install on this host. Any other answer exits before the install changes the system.
@@ -130,7 +132,7 @@ Optional settings, placed on the same command:
 | `OPENNHP_REF` | Asked during install | Skip the release menu. Example: `OPENNHP_REF=v1.0.2`. |
 
 ```bash
-sudo PUBLIC_IP=203.0.113.10 OPENNHP_REF=v1.0.2 bash nhp-linux-installer.sh
+sudo PUBLIC_IP=203.0.113.10 OPENNHP_REF=v1.0.2 bash opennhp-ubuntu-installer.sh
 ```
 
 ## Connect a phone or other client
@@ -149,7 +151,7 @@ Give the client these values:
 
 No separate username or password is required. A trusted device is allowed through.
 
-If you enabled one-time registration, a device can register itself. The app asks the server for a 6-digit code, the user enters that code, and the app sends it back. The private key stays on the device. The user id and the email address must be the same. The code expires in 5 minutes, and it only works for the device that requested it. If you left registration off, add keys with `nhp-manage-agents.sh` instead. The server rejects registration requests.
+If you enabled one-time registration, a device can register itself. The app asks the server for a 6-digit code, the user enters that code, and the app sends it back. The private key stays on the device. The user id and the email address must be the same. The code expires in 5 minutes, and it only works for the device that requested it. If you left registration off, add keys with `opennhp-manage-agents.sh` instead. The server rejects registration requests.
 
 This install does not set up email. Until you add a mail server, the code is written to the NHP server log. The file name uses the UTC date:
 
@@ -193,15 +195,15 @@ Running the installer again rewrites this config file and removes the SMTP setti
 You can also add a public key by hand. Run this from the same directory as the installer:
 
 ```bash
-sudo bash nhp-manage-agents.sh
+sudo bash opennhp-manage-agents.sh
 ```
 
 The script asks whether to add or remove a device, then walks through that choice. The server reloads the trusted list without a restart.
 
 ```bash
-sudo bash nhp-manage-agents.sh --name "Pixel" --public-key 'BASE64_PUBLIC_KEY'
-sudo bash nhp-manage-agents.sh --list
-sudo bash nhp-manage-agents.sh --remove "Pixel"
+sudo bash opennhp-manage-agents.sh --name "Pixel" --public-key 'BASE64_PUBLIC_KEY'
+sudo bash opennhp-manage-agents.sh --list
+sudo bash opennhp-manage-agents.sh --remove "Pixel"
 ```
 
 ## How long the site stays open
@@ -210,7 +212,7 @@ Each successful knock opens the website to that device for **60 seconds**. When 
 
 That 60 seconds is not how long the device remains trusted:
 
-- A key added with `nhp-manage-agents.sh`, or generated during install, stays trusted until 2030-12-31.
+- A key added with `opennhp-manage-agents.sh`, or generated during install, stays trusted until 2030-12-31.
 - A key registered with the one-time code stays trusted for 24 hours. After that, the next knock is rejected until the device registers again.
 
 ### Change the 60-second window
@@ -237,7 +239,7 @@ sudo systemctl restart nhp-server
 
 Keys already stored keep the expiry they were given. The new lifetime applies to the next registration.
 
-To change a key that was written into `agent.toml`, edit that entry's `ExpireTime`. The value is a Unix timestamp in seconds. `nhp-manage-agents.sh` writes `1924991999`. The server reloads `agent.toml` when the file changes.
+To change a key that was written into `agent.toml`, edit that entry's `ExpireTime`. The value is a Unix timestamp in seconds. `opennhp-manage-agents.sh` writes `1924991999`. The server reloads `agent.toml` when the file changes.
 
 ## Day-to-day commands
 
@@ -256,7 +258,7 @@ sudo ipset list defaultset
 sudo iptables -L OPENNHP -n -v
 ```
 
-Running `sudo bash nhp-linux-installer.sh` again keeps existing keys, asks about the demo site, one-time registration, and the agent public key again, rewrites configuration from the addresses you enter, and walks through the firewall question again. Press Enter at the demo and registration questions to keep the choice saved last time.
+Running `sudo bash opennhp-ubuntu-installer.sh` again keeps existing keys, asks about the demo site, one-time registration, and the agent public key again, rewrites configuration from the addresses you enter, and walks through the firewall question again. Press Enter at the demo and registration questions to keep the choice saved last time.
 
 ## What the installer does
 
@@ -300,6 +302,11 @@ The firewall allows an existing connection to finish, allows a device that just 
 
 `INSTALLER_VERSION` is printed at startup and stored in `/opt/opennhp/installer.env`.
 
+### 1.0.6 — 2026-10-23
+
+- Renamed the scripts to match the OpenNHP project: `nhp-linux-installer.sh` is now `opennhp-ubuntu-installer.sh`, and `nhp-manage-agents.sh` is now `opennhp-manage-agents.sh`. Update any saved commands, `scp` copies, or automation that referenced the old names.
+- Added `CLAUDE.md` and `CONTRIBUTING.md` to align the repository workflow with the upstream OpenNHP repo.
+
 ### 1.0.5 — 2026-10-22
 
 - Installer output is shorter. Package, git, and compiler logs stay hidden unless a command fails.
@@ -332,7 +339,7 @@ First tracked release.
 - Reads noisy key-generation output and keeps the key.
 - Removes the upstream `remote.toml` so the access controller uses the local configuration.
 - Keeps trusted device keys when the installer runs again.
-- Adds `nhp-manage-agents.sh`.
+- Adds `opennhp-manage-agents.sh`.
 - Offers uninstall when OpenNHP is already configured.
 - Records the installer version in the banner, the summary, and `installer.env`.
 
