@@ -12,7 +12,7 @@ Please read and follow the OpenNHP [Code of Conduct](https://github.com/OpenNHP/
 
 This repository is two Bash scripts that install OpenNHP on a host. To develop and test them you need:
 
-- **Ubuntu 24.04 LTS (x86_64)** - The only supported target for running the installer. An EC2 instance is the documented path (see [README.md](README.md)).
+- **A supported Ubuntu LTS (x86_64)** - 24.04 is the baseline; 22.04 and 26.04 are also supported (see [Supported Ubuntu versions](README.md#supported-ubuntu-versions)). An EC2 instance is the documented path (see [README.md](README.md)).
 - **Bash** - The scripts use `#!/usr/bin/env bash`.
 - **Git** - Version control.
 - **ShellCheck** (recommended) - For linting the scripts.
@@ -55,7 +55,7 @@ bash opennhp-ubuntu-installer.sh --version
 bash opennhp-manage-agents.sh --version
 ```
 
-A behavior change must also be run end-to-end on a fresh **Ubuntu 24.04 x86_64** host before it is considered tested. The installer modifies services, the firewall, and `/opt/opennhp`, so use a disposable host and keep a second way in (EC2 Session Manager or the serial console) when testing the firewall step.
+A behavior change must also be run end-to-end on a fresh **supported Ubuntu LTS x86_64** host before it is considered tested (and on each release a version-support change claims to add). The installer modifies services, the firewall, and `/opt/opennhp`, so use a disposable host and keep a second way in (EC2 Session Manager or the serial console) when testing the firewall step.
 
 ### Code Style
 

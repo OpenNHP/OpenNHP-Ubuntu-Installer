@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 
 # Keep this in sync with opennhp-ubuntu-installer.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.6
+INSTALLER_VERSION=1.0.7
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   printf 'opennhp-manage-agents.sh %s\n' "$INSTALLER_VERSION"
   exit 0

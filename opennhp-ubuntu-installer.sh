@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 
 # Keep this in sync with opennhp-manage-agents.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.6
+INSTALLER_VERSION=1.0.7
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   printf 'opennhp-ubuntu-installer.sh %s\n' "$INSTALLER_VERSION"
   exit 0
@@ -169,17 +169,115 @@ save_state(){
   } > "$STATE"
   chmod 600 "$STATE"
 }
+# Ubuntu LTS releases this installer supports. See the support policy in
+# README.md. Status values:
+#   primary     development and testing baseline
+#   supported   verified to work
+#   deprecated  still works, but standard security maintenance ends soon
+ubuntu_support_status(){
+  case $1 in
+    24.04) printf 'primary' ;;
+    26.04) printf 'supported' ;;
+    22.04) printf 'deprecated' ;;
+    *)     printf 'unsupported' ;;
+  esac
+}
+# Gather host facts, print a system summary, then run the compatibility
+# checks. Hard requirements (architecture, a supported Ubuntu release,
+# IPv4-only networking, systemd) stop the installer; resource and
+# connectivity shortfalls only warn. A version mismatch can be overridden
+# with ALLOW_UNSUPPORTED_UBUNTU=1.
+preflight(){
+  local fails=0 arch kern pretty cores mem_kib mem_gib target disk_avail status
+  arch=$(uname -m)
+  kern=$(uname -r)
+  pretty=${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-}}
+  cores=$(nproc 2>/dev/null || echo '?')
+  mem_kib=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  mem_gib=$(awk -v k="${mem_kib:-0}" 'BEGIN{ if (k+0>0) printf "%.1f", k/1048576; else printf "?" }')
+  target=/opt; [[ -d $target ]] || target=/
+  disk_avail=$(df -BG --output=avail "$target" 2>/dev/null | awk 'NR==2{gsub(/[^0-9]/,"");print $1}')
+  [[ -n $disk_avail ]] || disk_avail='?'
+  status=$(ubuntu_support_status "${VERSION_ID:-}")
+
+  say 'System and compatibility checks'
+  kv 'Hostname' "$(uname -n)"
+  kv 'OS' "$pretty"
+  kv 'Kernel' "$kern"
+  kv 'Architecture' "$arch"
+  kv 'CPU cores' "$cores"
+  kv 'Memory' "${mem_gib} GiB"
+  kv "Free disk ($target)" "${disk_avail} GiB"
+  printf '\n'
+
+  # Architecture -- hard requirement.
+  if [[ $arch == x86_64 ]]; then
+    ok 'Architecture x86_64 is supported'
+  else
+    warn "Architecture $arch is not supported (x86_64 only)"
+    fails=$((fails + 1))
+  fi
+
+  # Distribution and version -- hard requirement.
+  if [[ ${ID:-} != ubuntu ]]; then
+    warn "Operating system is '${ID:-unknown}', not Ubuntu"
+    fails=$((fails + 1))
+  else
+    case $status in
+      primary)   ok "Ubuntu ${VERSION_ID} LTS is supported (development baseline)" ;;
+      supported) ok "Ubuntu ${VERSION_ID} LTS is supported" ;;
+      deprecated)
+        warn "Ubuntu ${VERSION_ID} LTS works, but its standard security maintenance ends soon; 24.04 LTS is recommended" ;;
+      *)
+        if [[ ${ALLOW_UNSUPPORTED_UBUNTU:-0} == 1 ]]; then
+          warn "Ubuntu ${VERSION_ID:-unknown} is not a supported release; continuing because ALLOW_UNSUPPORTED_UBUNTU=1"
+        else
+          warn "Ubuntu ${VERSION_ID:-unknown} is not a supported release (supported: 22.04, 24.04, 26.04)"
+          fails=$((fails + 1))
+        fi ;;
+    esac
+  fi
+
+  # The firewall profile is intentionally IPv4-only -- refuse public IPv6.
+  if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
+    warn 'Global IPv6 address detected; disable IPv6 or add matching IPv6 protections first'
+    fails=$((fails + 1))
+  else
+    ok 'No global IPv6 address'
+  fi
+
+  # systemd -- the OpenNHP services are managed through it.
+  if [[ -d /run/systemd/system ]]; then
+    ok 'systemd is available'
+  else
+    warn 'systemd was not detected; the OpenNHP services require it'
+    fails=$((fails + 1))
+  fi
+
+  # Soft checks -- resources and connectivity only warn.
+  if [[ ${mem_kib:-0} -gt 0 && ${mem_kib:-0} -lt 1048576 ]]; then
+    warn "Memory ${mem_gib} GiB is below the 1 GiB recommended for the build"
+  fi
+  if [[ $disk_avail != '?' && $disk_avail -lt 5 ]]; then
+    warn "Free disk ${disk_avail} GiB on $target is below the 5 GiB the build needs"
+  fi
+  if timeout 5 bash -c 'exec 3<>/dev/tcp/github.com/443' 2>/dev/null; then
+    ok 'Outbound HTTPS to github.com is reachable'
+  else
+    warn 'Could not reach github.com:443; the installer needs outbound HTTPS'
+  fi
+
+  printf '\n'
+  if [[ $fails -gt 0 ]]; then
+    die "$fails compatibility check(s) failed. Resolve the items marked ! above. A version mismatch can be overridden with ALLOW_UNSUPPORTED_UBUNTU=1."
+  fi
+  ok 'All required checks passed'
+}
 trap 'warn "Installer exited at line $LINENO. Re-run it to resume; existing keys remain unchanged."' ERR
 
 [[ -t 0 && -e /dev/tty ]] || die 'Run interactively from an SSH terminal: sudo bash opennhp-ubuntu-installer.sh'
 [[ $EUID == 0 ]] || die 'Run with sudo: sudo bash opennhp-ubuntu-installer.sh'
-[[ $(uname -m) == x86_64 ]] || die 'This installer targets x86_64 Ubuntu (e.g., EC2 t3.small).'
 source /etc/os-release
-# The firewall profile below is intentionally IPv4-only. Refuse public IPv6.
-if ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
-  die "Global IPv6 address detected. Disable IPv6 on this host or implement matching IPv6 protections before using this script."
-fi
-[[ $ID == ubuntu && $VERSION_ID == 24.04 ]] || die 'This installer targets Ubuntu Server 24.04 LTS.'
 # Honor OPENNHP_REF from the command line. A value saved by a previous run
 # is only the menu default, so a re-run still asks. Read it before an
 # uninstall deletes installer.env.
@@ -196,6 +294,7 @@ fi
 INSTALLER_VERSION=$script_version
 
 say "OpenNHP installer ${INSTALLER_VERSION}"
+preflight
 info 'Installs the OpenNHP server and access controller on this host.'
 info 'TCP 80 can be placed behind a knock. SSH and UDP 62206 stay open.'
 info 'Allow TCP 22 from your IP, and UDP 62206 plus TCP 80 from clients.'
