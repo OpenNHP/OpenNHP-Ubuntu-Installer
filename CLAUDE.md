@@ -96,9 +96,9 @@ A version bump that accompanies a behavior change rides with that change's commi
 
 - The uninstall path (choice 2 when OpenNHP is already present) stops services, removes the TCP/80 firewall rules, and **deletes `/opt/opennhp`, including private keys and trusted devices**. Treat it as destructive.
 - Never commit private keys, `secrets/`, or anything from `/opt/opennhp` into the repo.
-- The installer opens only TCP port 80 in the host firewall; it never touches SSH or the knock port. Preserve that invariant.
+- The installer guards only the TCP ports the operator chooses (default 80); it never touches SSH or the knock port. SSH (22) and the knock port (62206) are hard-rejected from the protected set in `normalize_ports()` — preserve that. The generated `/usr/local/sbin/nhp-firewall-rules` uses one `-m multiport` jump and reconciles all `INPUT -> OPENNHP` jumps on start/stop, so re-runs drop ports no longer protected.
 - Re-running the installer rewrites config files (and drops any manually added SMTP settings). Keep that documented behavior intact or update the README if you change it.
 
 ## Protocol Context
 
-OpenNHP is a Zero Trust toolkit: a device sends an encrypted "knock" (UDP 62206) to `nhp-serverd`; on success `nhp-acd` opens a short window in the firewall for that device to reach the protected resource (the demo `web` site on TCP 80). This installer wires up that flow with the upstream `example` plugin. For protocol internals, see the [upstream repository](https://github.com/OpenNHP/opennhp).
+OpenNHP is a Zero Trust toolkit: a device sends an encrypted "knock" (UDP 62206) to `nhp-serverd`; on success `nhp-acd` opens a short window in the firewall for that device to reach the protected resource (the `web` resource, which carries one backend per chosen TCP port). This installer wires up that flow with the upstream `example` plugin. For protocol internals, see the [upstream repository](https://github.com/OpenNHP/opennhp).

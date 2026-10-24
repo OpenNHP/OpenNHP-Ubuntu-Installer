@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 
 # Keep this in sync with opennhp-manage-agents.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.7
+INSTALLER_VERSION=1.0.8
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   printf 'opennhp-ubuntu-installer.sh %s\n' "$INSTALLER_VERSION"
   exit 0
@@ -42,6 +42,45 @@ prompt_bool(){
   [[ ${v,,} == y || ${v,,} == yes ]]
 }
 kv(){ printf '  %-18s %s\n' "$1" "$2"; }
+# Ports that must never be placed behind NHP: SSH and the knock port.
+# Guarding either would risk locking the operator out or breaking knocks.
+RESERVED_PORTS='22 62206'
+MAX_PORTS=15
+# Validate and normalize a TCP port list. Accepts a space- or comma-separated
+# string. On success prints a comma-separated, de-duplicated list (order
+# preserved). On failure prints nothing and writes the reason to stderr.
+normalize_ports(){
+  local raw=${1//,/ } tok p seen=' ' out=()
+  for tok in $raw; do
+    [[ $tok =~ ^[0-9]+$ ]] || { echo "Not a number: '$tok'" >&2; return 1; }
+    p=$((10#$tok))
+    (( p >= 1 && p <= 65535 )) || { echo "Port out of range (1-65535): $tok" >&2; return 1; }
+    [[ " $RESERVED_PORTS " == *" $p "* ]] && { echo "Port $p is reserved; SSH (22) and the knock port (62206) must stay reachable" >&2; return 1; }
+    [[ $seen == *" $p "* ]] && continue
+    seen+="$p "
+    out+=("$p")
+  done
+  (( ${#out[@]} > 0 )) || { echo 'No valid ports given' >&2; return 1; }
+  (( ${#out[@]} <= MAX_PORTS )) || { echo "Too many ports (max $MAX_PORTS)" >&2; return 1; }
+  local IFS=,
+  echo "${out[*]}"
+}
+# True when $2 (comma list) contains port $1.
+ports_include(){ [[ ",$2," == *",$1,"* ]]; }
+# Ask for the TCP ports to protect, re-prompting until the entry is valid.
+# Sets PROTECTED_PORTS to the normalized list.
+choose_ports(){
+  local default=$1 raw norm
+  while true; do
+    raw=$(ask "TCP ports to protect, space or comma separated [$default]: ")
+    raw=${raw:-$default}
+    if norm=$(normalize_ports "$raw"); then
+      PROTECTED_PORTS=$norm
+      return 0
+    fi
+    info 'Enter one or more TCP ports (1-65535). 22 and 62206 are not allowed.'
+  done
+}
 # Hide a long command. On failure, show the tail of its output and stop.
 run_quiet(){
   local label=$1 log
@@ -126,8 +165,10 @@ uninstall_opennhp(){
   if [[ -x /usr/local/sbin/nhp-firewall-rules ]]; then
     /usr/local/sbin/nhp-firewall-rules stop || true
   fi
-  while iptables -C INPUT -p tcp --dport 80 -j OPENNHP >/dev/null 2>&1; do
-    iptables -D INPUT -p tcp --dport 80 -j OPENNHP
+  # Remove every INPUT jump into OPENNHP, whatever ports it covered, in case
+  # the firewall-rules helper is missing (partial install).
+  iptables -S INPUT 2>/dev/null | awk '/-j OPENNHP$/{$1="-D"; print}' | while read -r spec; do
+    iptables $spec 2>/dev/null || true
   done
   iptables -F OPENNHP 2>/dev/null || true
   iptables -X OPENNHP 2>/dev/null || true
@@ -166,6 +207,7 @@ save_state(){
     [[ -n ${BUILT_COMMIT:-} ]] && printf 'BUILT_COMMIT=%q\n' "$BUILT_COMMIT"
     [[ -n ${ENABLE_OTP:-} ]] && printf 'ENABLE_OTP=%q\n' "$ENABLE_OTP"
     [[ -n ${INSTALL_DEMO:-} ]] && printf 'INSTALL_DEMO=%q\n' "$INSTALL_DEMO"
+    [[ -n ${PROTECTED_PORTS:-} ]] && printf 'PROTECTED_PORTS=%q\n' "$PROTECTED_PORTS"
   } > "$STATE"
   chmod 600 "$STATE"
 }
@@ -278,26 +320,31 @@ trap 'warn "Installer exited at line $LINENO. Re-run it to resume; existing keys
 [[ -t 0 && -e /dev/tty ]] || die 'Run interactively from an SSH terminal: sudo bash opennhp-ubuntu-installer.sh'
 [[ $EUID == 0 ]] || die 'Run with sudo: sudo bash opennhp-ubuntu-installer.sh'
 source /etc/os-release
-# Honor OPENNHP_REF from the command line. A value saved by a previous run
-# is only the menu default, so a re-run still asks. Read it before an
-# uninstall deletes installer.env.
+# Honor OPENNHP_REF and PROTECTED_PORTS from the command line. A value saved
+# by a previous run is only the default, so a re-run still asks. Read them
+# before an uninstall deletes installer.env.
 PRESET_REF=${OPENNHP_REF-}
+PRESET_PORTS=${PROTECTED_PORTS-}
 PREV_OTP=1
 PREV_DEMO=1
+PREV_PORTS=80
 script_version=$INSTALLER_VERSION
 if [[ -f $STATE ]]; then
   source "$STATE"
   PREV_OTP=${ENABLE_OTP:-1}
   PREV_DEMO=${INSTALL_DEMO:-1}
+  PREV_PORTS=${PROTECTED_PORTS:-80}
 fi
+# PROTECTED_PORTS is chosen below; the saved value is only the default.
+PROTECTED_PORTS=''
 # installer.env records the version that wrote it. Keep this script's version.
 INSTALLER_VERSION=$script_version
 
 say "OpenNHP installer ${INSTALLER_VERSION}"
 preflight
 info 'Installs the OpenNHP server and access controller on this host.'
-info 'TCP 80 can be placed behind a knock. SSH and UDP 62206 stay open.'
-info 'Allow TCP 22 from your IP, and UDP 62206 plus TCP 80 from clients.'
+info 'You choose which TCP ports to place behind a knock. SSH and UDP 62206 stay open.'
+info 'Allow TCP 22 from your IP, and UDP 62206 plus your protected ports from clients.'
 info 'Keep Session Manager or the serial console available before the firewall is turned on.'
 if opennhp_configured; then
   say 'This host already has OpenNHP'
@@ -309,7 +356,7 @@ if opennhp_configured; then
     case $choice in
       1) break ;;
       2)
-        info 'This stops OpenNHP, deletes /opt/opennhp, and removes the TCP 80 guard.'
+        info 'This stops OpenNHP, deletes /opt/opennhp, and removes the NHP port guard.'
         info 'Private keys and trusted devices are deleted. This cannot be undone.'
         info 'NGINX, Go, and other firewall rules, including SSH, stay in place.'
         confirm 'Uninstall OpenNHP on this host?' || exit 0
@@ -343,6 +390,25 @@ else
   ENABLE_OTP=0
   ok 'One-time registration will be left off'
 fi
+
+info 'OpenNHP guards one or more TCP ports: new connections are dropped until a knock opens them.'
+info 'SSH (22) and the knock port (62206) are never guarded. The default is TCP 80.'
+info 'Re-running the installer can change this set without touching keys or trusted agents.'
+if [[ -n $PRESET_PORTS ]]; then
+  if PROTECTED_PORTS=$(normalize_ports "$PRESET_PORTS"); then
+    ok "Using PROTECTED_PORTS=$PROTECTED_PORTS from the environment"
+  else
+    die "Invalid PROTECTED_PORTS=$PRESET_PORTS"
+  fi
+else
+  choose_ports "$PREV_PORTS"
+fi
+# The demo website binds TCP 80, so keep 80 guarded whenever it is installed.
+if [[ $INSTALL_DEMO == 1 ]] && ! ports_include 80 "$PROTECTED_PORTS"; then
+  PROTECTED_PORTS="80,$PROTECTED_PORTS"
+  info 'Added TCP 80 to the protected set because the demo website is installed.'
+fi
+ok "Protecting TCP ${PROTECTED_PORTS}"
 
 mkdir -p "$ROOT" "$SECRETS"
 chmod 700 "$ROOT" "$SECRETS"
@@ -699,6 +765,19 @@ HttpListenPort = 443
 TLSCertFile = "cert/cert.pem"
 TLSKeyFile = "cert/cert.key"
 EOF
+# One backend per protected port, all under the "web" resource, so a single
+# knock opens every port the operator chose.
+web_backends=''
+IFS=, read -ra _ports <<< "$PROTECTED_PORTS"
+for _p in "${_ports[@]}"; do
+  web_backends+="[\"web\".Resources.\"web${_p}\"]"$'\n'
+  web_backends+="ACId = \"nhp-ac\""$'\n'
+  web_backends+="Hostname = \"${public_ip}\""$'\n'
+  web_backends+="Addr.Ip = \"${private_ip}\""$'\n'
+  web_backends+="Addr.Port = ${_p}"$'\n'
+  web_backends+="Addr.Protocol = \"tcp\""$'\n'
+  web_backends+="PortSuffix = false"$'\n'
+done
 cat > "$SERVER/plugins/example/etc/resource.toml" <<EOF
 ["web"]
 SkipAuth = true
@@ -706,14 +785,7 @@ OpenTime = 60
 RedirectUrl = ""
 RedirectWithParams = false
 CookieDomain = ""
-["web".Resources."website"]
-ACId = "nhp-ac"
-Hostname = "$public_ip"
-Addr.Ip = "$private_ip"
-Addr.Port = 80
-Addr.Protocol = "tcp"
-PortSuffix = false
-["web".ExInfo]
+${web_backends}["web".ExInfo]
 Title = "OpenNHP"
 EOF
 cat > "$SERVER/plugins/example/etc/config.toml" <<'EOF'
@@ -827,6 +899,16 @@ EOF
 cat > /usr/local/sbin/nhp-firewall-rules <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# The TCP ports this host places behind a knock, as a multiport list.
+PORTS="${PROTECTED_PORTS}"
+# Remove every INPUT jump into the OPENNHP chain, whatever ports it covers
+# (including a previous port set). start and stop both call this so the rules
+# always reconcile to the current PORTS -- ports no longer protected are dropped.
+drop_jumps(){
+  iptables -S INPUT 2>/dev/null | awk '/-j OPENNHP\$/{\$1="-D"; print}' | while read -r spec; do
+    iptables \$spec 2>/dev/null || true
+  done
+}
 case "\${1:-}" in
  start)
   ipset create defaultset hash:ip,port,ip timeout 120 -exist
@@ -838,10 +920,11 @@ case "\${1:-}" in
   iptables -A OPENNHP -m set --match-set defaultset src,dst,dst -j ACCEPT
   iptables -A OPENNHP -m set --match-set tempset src,dst -j ACCEPT
   iptables -A OPENNHP -j DROP
-  iptables -C INPUT -p tcp --dport 80 -j OPENNHP 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 80 -j OPENNHP
+  drop_jumps
+  iptables -I INPUT 1 -p tcp -m multiport --dports "\$PORTS" -j OPENNHP
   ;;
  stop)
-  iptables -D INPUT -p tcp --dport 80 -j OPENNHP 2>/dev/null || true
+  drop_jumps
   iptables -F OPENNHP 2>/dev/null || true
   iptables -X OPENNHP 2>/dev/null || true
   ;;
@@ -884,19 +967,19 @@ systemctl is-active --quiet nhp-server.service || die 'NHP server did not start.
 ok 'OpenNHP server is running'
 
 say 'Firewall'
-info 'Only new connections to TCP 80 are guarded. SSH and UDP 62206 are left as they are.'
+info "Only new connections to TCP ${PROTECTED_PORTS} are guarded. SSH and UDP 62206 are left as they are."
 info 'Existing firewall rules are not flushed.'
 info 'If you turn this on, it rolls back in 180 seconds unless you confirm SSH still works.'
-if confirm 'Protect TCP 80 and start the access controller now?'; then
-  # A temporary systemd timer removes the guarded rule if the SSH session drops.
+if confirm "Protect TCP ${PROTECTED_PORTS} and start the access controller now?"; then
+  # A temporary systemd timer removes the guarded rules if the SSH session drops.
   systemd-run --unit=nhp-rollback --on-active=180s /usr/local/sbin/nhp-firewall-rules stop >/dev/null
   systemctl restart nhp-firewall.service
   if ! systemctl restart nhp-ac.service; then
     systemctl stop nhp-firewall.service || true
-    die 'NHP AC failed; TCP/80 firewall rolled back. Check journalctl -u nhp-ac -n 100.'
+    die "NHP AC failed; TCP ${PROTECTED_PORTS} firewall rolled back. Check journalctl -u nhp-ac -n 100."
   fi
   systemctl is-active --quiet nhp-ac.service || die 'NHP AC is not running.'
-  warn 'TCP 80 is protected. The rule comes off in 180 seconds unless you keep it.'
+  warn "TCP ${PROTECTED_PORTS} is protected. The rules come off in 180 seconds unless you keep them."
   for unit in nhp-server nhp-ac nhp-firewall; do
     if systemctl is-active --quiet "$unit"; then
       ok "$unit is running"
@@ -905,19 +988,19 @@ if confirm 'Protect TCP 80 and start the access controller now?'; then
     fi
   done
   pause 'Press Enter after you confirm this SSH session still works...'
-  if confirm 'Keep TCP 80 protected on boot?'; then
+  if confirm "Keep TCP ${PROTECTED_PORTS} protected on boot?"; then
     systemctl stop nhp-rollback.timer 2>/dev/null || true
     systemctl reset-failed nhp-rollback.service 2>/dev/null || true
-    ok 'TCP 80 stays protected across reboots'
+    ok "TCP ${PROTECTED_PORTS} stays protected across reboots"
   else
     systemctl stop nhp-ac.service nhp-firewall.service || true
     systemctl stop nhp-rollback.timer 2>/dev/null || true
     systemctl disable nhp-ac.service nhp-firewall.service || true
-    warn 'TCP 80 is open again, including after a reboot.'
+    warn "TCP ${PROTECTED_PORTS} is open again, including after a reboot."
   fi
 else
   systemctl disable nhp-ac.service nhp-firewall.service || true
-  warn 'TCP 80 was left open.'
+  warn "TCP ${PROTECTED_PORTS} was left open."
 fi
 
 say 'Summary'
@@ -933,6 +1016,7 @@ else
 fi
 kv 'Knock' "$public_ip UDP 62206"
 kv 'Resource' 'example / web'
+kv 'Protected ports' "tcp ${PROTECTED_PORTS}"
 kv 'Open time' '60 seconds for new TCP connections'
 if [[ $ENABLE_OTP == 1 ]]; then
   kv 'Registration' 'one-time codes, written to the server log'
@@ -940,7 +1024,7 @@ else
   kv 'Registration' 'off'
 fi
 kv 'Secrets' "$SECRETS"
-info 'Allow UDP 62206 and TCP 80 from clients. Limit SSH to your IP.'
+info "Allow UDP 62206 and TCP ${PROTECTED_PORTS} from clients. Limit SSH to your IP."
 info 'Copy the server public key into the client. Leave private keys on this host.'
 if [[ $ENABLE_OTP == 1 ]]; then
   info "Codes are logged in $SERVER/logs/server-YYYY-MM-DD.log as OTP CODE."
