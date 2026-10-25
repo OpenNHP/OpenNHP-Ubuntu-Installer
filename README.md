@@ -2,6 +2,27 @@
 
 **Version 1.0.8** (2026-10-24)
 
+[OpenNHP](https://github.com/OpenNHP/opennhp) helps protect your servers, websites, and applications by keeping selected network ports inaccessible until an authorized device requests access. Instead of leaving services exposed to the public internet, OpenNHP uses an encrypted network knock to verify a trusted device before allowing it to connect.
+
+Getting started with OpenNHP normally involves building the software, configuring multiple components, generating security keys, and setting up firewall rules. This installer simplifies that process by handling the setup and configuration for you on a supported Ubuntu server.
+
+Whether you're exploring OpenNHP for the first time, testing it on a cloud server, or looking for a way to protect existing services, this installer provides a practical starting point.
+
+### What This Installer Does
+
+- **Simplifies installation:** Downloads and installs an official OpenNHP release, then configures the required components to run automatically as system services.
+- **Protects the ports you choose:** Blocks new connections to selected TCP ports until an authorized device successfully completes the network knock. SSH and the knock port remain accessible, with a 180-second safety mechanism to help prevent accidental lockouts during firewall setup.
+- **Works with existing websites and services:** Optionally installs a sample website using NGINX for testing, or leaves your existing website in place while allowing you to protect its ports.
+- **Makes device management easier:** Automatically generates the required security keys and provides the connection details needed to configure your clients. A management script lets you add or remove trusted devices, with optional one-time registration using a 6-digit code.
+- **Checks compatibility before installation:** Verifies your operating system, system architecture, and network configuration before making changes. Installation stops if the server does not meet the supported requirements.
+- **Supports updates and configuration changes:** Run the installer again to update OpenNHP or change protected ports without losing your existing security keys or registered devices.
+
+### Getting Started
+
+The goal is simple: take a fresh Ubuntu server and turn it into a working OpenNHP environment without having to build and configure every component manually.
+
+The walkthrough below takes you through creating an Amazon EC2 instance, installing OpenNHP, configuring your protected ports, and testing your first network knock from a trusted device.
+
 `opennhp-ubuntu-installer.sh` installs [OpenNHP](https://github.com/OpenNHP/opennhp) on one supported Ubuntu LTS server (24.04 is the baseline; 22.04 and 26.04 also work — see [Supported Ubuntu versions](#supported-ubuntu-versions)). `opennhp-manage-agents.sh` adds or removes trusted devices after install. Both scripts live in [OpenNHP-Ubuntu-Installer](https://github.com/OpenNHP/OpenNHP-Ubuntu-Installer). They use the same version number. When either script changes, raise `INSTALLER_VERSION` in both files and add a [Changelog](#changelog) entry.
 
 ```bash
@@ -87,13 +108,10 @@ sudo PROTECTED_PORTS=80,443 bash opennhp-ubuntu-installer.sh
 6. Create a security group with these inbound rules:
 
    | Type | Port | Source |
-       | --- | --- | --- |
-       | SSH | TCP 22 | Your IP only |
-       | Custom UDP | 62206 | The phones or networks that will knock |
-       | Protected ports | TCP (the ports you choose, e.g. 80, 443) | Those same clients |
-   ```
-   The installer cannot change this security group. Open the TCP ports you plan to protect here; if they are closed in AWS, the instance never sees the traffic. The security group decides which ports are reachable, while OpenNHP decides which of those open only after a knock.
-   ```
+        | --- | --- | --- |
+        | SSH | TCP 22 | Your IP only |
+        | Custom UDP | 62206 | The phones or networks that will knock |
+        | Protected ports | TCP (the ports you choose, e.g. 80, 443) | Those same clients |
 7. Leave the disk at the default size and launch the instance.
 8. Wait until the instance is **Running** and the status checks pass. Copy the public IPv4 address.
 
