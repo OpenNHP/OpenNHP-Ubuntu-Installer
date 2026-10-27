@@ -553,19 +553,26 @@ if [[ ! -d "$SRC/.git" ]]; then
 fi
 cd "$SRC"
 restore_plugin_source
-run_quiet 'Fetch OpenNHP tags' git fetch --tags --quiet origin
+# Fetch both tags and branches (the default clone refspec updates origin/main),
+# so the nightly option can track the latest development tip.
+run_quiet 'Fetch OpenNHP' git fetch --tags --quiet origin
 mapfile -t release_tags < <(git tag -l 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 10 || true)
 ((${#release_tags[@]})) || die 'No OpenNHP release tags were found. Check network access to github.com.'
-release_refs=("${release_tags[@]}")
+# Selectable builds: the published releases, plus a nightly build from main.
+release_refs=("${release_tags[@]}" nightly)
 if [[ -n $PRESET_REF ]]; then
-  OPENNHP_REF=$PRESET_REF
+  case ${PRESET_REF,,} in
+    nightly|main|origin/main) OPENNHP_REF=nightly ;;
+    *) OPENNHP_REF=$PRESET_REF ;;
+  esac
   ok "Using OPENNHP_REF=$OPENNHP_REF from the environment"
 else
-  info "1  ${release_tags[0]}  (latest)"
+  info "1  ${release_tags[0]}  (latest release)"
   for i in "${!release_tags[@]}"; do
     (( i == 0 )) && continue
     info "$((i+1))  ${release_tags[$i]}"
   done
+  info "$((${#release_tags[@]}+1))  nightly (main branch, latest development)"
   info 'Releases before v1.0.0 use an older configuration layout.'
   default_choice=1
   if [[ -n ${OPENNHP_REF:-} ]]; then
@@ -574,7 +581,7 @@ else
     done
   fi
   while true; do
-    choice=$(ask "Select a release [${default_choice}]: ")
+    choice=$(ask "Select a build [${default_choice}]: ")
     choice=${choice:-$default_choice}
     if [[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#release_refs[@]} )); then
       break
@@ -583,13 +590,22 @@ else
   done
   OPENNHP_REF=${release_refs[$((choice-1))]}
 fi
-git rev-parse --verify --quiet "${OPENNHP_REF}^{commit}" >/dev/null || die "Unknown OpenNHP revision: $OPENNHP_REF"
-target_commit=$(git rev-parse "${OPENNHP_REF}^{commit}")
+# Resolve the choice to a concrete ref. "nightly" tracks origin/main, so each
+# run rebuilds when upstream main has advanced.
+if [[ $OPENNHP_REF == nightly ]]; then
+  checkout_ref=origin/main
+  ref_label='nightly (main)'
+else
+  checkout_ref=$OPENNHP_REF
+  ref_label=$OPENNHP_REF
+fi
+git rev-parse --verify --quiet "${checkout_ref}^{commit}" >/dev/null || die "Unknown OpenNHP revision: $checkout_ref"
+target_commit=$(git rev-parse "${checkout_ref}^{commit}")
 if [[ $(git rev-parse HEAD) != "$target_commit" ]]; then
   git diff --quiet && git diff --cached --quiet || die 'Existing source has local changes. Not overwriting.'
-  git checkout --quiet --detach "$OPENNHP_REF"
+  git checkout --quiet --detach "$checkout_ref"
 fi
-ok "OpenNHP $OPENNHP_REF ($(git rev-parse --short HEAD))"
+ok "OpenNHP $ref_label ($(git rev-parse --short HEAD))"
 
 say 'Build'
 # Upstream imports the KBS package on startup even for keygen; it creates this path.
@@ -1110,7 +1126,7 @@ fi
 
 header 'Installation summary'
 kv 'Installer' "$INSTALLER_VERSION"
-kv 'OpenNHP' "$OPENNHP_REF ($(git -C "$SRC" rev-parse --short HEAD))"
+kv 'OpenNHP' "$ref_label ($(git -C "$SRC" rev-parse --short HEAD))"
 kv 'Server key' "$server_pub"
 kv 'AC key' "$ac_pub"
 kv 'Agent key' "$AGENT_PUB"
