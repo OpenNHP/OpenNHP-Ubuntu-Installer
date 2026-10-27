@@ -10,6 +10,7 @@
 - Protects the TCP ports you choose. SSH and the knock port stay open, and a 180-second rollback guards against accidental lockouts.
 - Works alongside an existing website, or installs an optional NGINX demo page for testing.
 - Generates the security keys and prints the connection details your clients need. A helper script adds or removes trusted devices, with optional one-time registration by 6-digit code.
+- Exports server connection settings as JSON and a shareable QR code with `opennhp-share-config.sh`, using QuickChart without an API key. See [Share server connection settings with agents](#share-server-connection-settings-with-agents).
 - Checks compatibility before making changes, and can be re-run to update OpenNHP or change protected ports without losing keys or trusted devices.
 
 ## Quickstart
@@ -71,7 +72,7 @@ You will also be asked:
 
 - Whether to install the demo website. Press Enter to install NGINX and a sample page. Answer `n` to leave an existing site alone. OpenNHP can still guard TCP port 80.
 - Whether to enable one-time registration. Press Enter to allow a device to register itself with a 6-digit code. Answer `n` to trust only keys you add. The example plugin is rebuilt so registration requests are rejected.
-- Which OpenNHP release to build. Press Enter to install the latest release.
+- Which build to install. Press Enter for the latest release, pick an older release, or choose **nightly** to build from the `main` branch (latest development).
 - Whether to generate an agent key on the server or paste a public key you already have.
 - The public address clients should use. The script suggests the address reported by AWS. Confirm it or type a hostname.
 - Whether to turn on the website firewall now.
@@ -111,6 +112,81 @@ sudo bash opennhp-manage-agents.sh --name "Pixel" --public-key 'BASE64_PUBLIC_KE
 sudo bash opennhp-manage-agents.sh --list
 sudo bash opennhp-manage-agents.sh --remove "Pixel"
 ```
+
+### Share server connection settings with agents
+
+After installing OpenNHP, run `opennhp-share-config.sh` on the server from the same directory as the installer:
+
+```bash
+sudo bash opennhp-share-config.sh
+# Also download the QR image now:
+sudo bash opennhp-share-config.sh --download-qr
+```
+
+It reads the installed server's `Hostname`, `ListenPort`, and server public key,
+then writes `connection.json` and `qr-link.txt` into a new, root-only directory
+under `/opt/opennhp/shares/`. It prints a shareable QuickChart QR image link.
+Opening that link generates a QR containing the JSON string directly; no JSON
+hosting, account, or API key is needed. `--download-qr` also saves `qr.png`.
+Without that flag the script makes no network requests.
+
+Share the JSON file, QR image, or printed link with trusted users. The JSON has
+`schemaVersion`, `host`, `port` (UDP knock port), `serverPublicKey`,
+`authServiceId` (default `example`), and `resourceId` (default `web`). These are
+server connection settings only: no private keys, passwords, or registration
+codes are exported. An agent must support this JSON format to import it
+automatically; otherwise enter the values manually. Each device still needs
+its own key and must be added by the administrator or register with a one-time
+code before it can knock successfully.
+
+[QuickChart's documented QR endpoint](https://quickchart.io/documentation/qr-codes/)
+provides the image. Opening the link or downloading the QR sends its JSON
+contents to QuickChart. Its [privacy policy](https://quickchart.io/privacy/)
+describes request logging; treat the link as disclosing the server's address
+and public connection settings to that service. The link has no built-in expiry
+or access restriction. To avoid depending on the service when sharing, download
+and share the PNG or share the JSON directly.
+
+For example, the generated JSON looks like this (the public key below is a placeholder):
+
+```json
+{
+  "schemaVersion": 1,
+  "host": "vpn.example.com",
+  "port": 62206,
+  "serverPublicKey": "BASE64_SERVER_PUBLIC_KEY",
+  "authServiceId": "example",
+  "resourceId": "web"
+}
+```
+
+The host, port, and public key come from the installed server rather than these
+example values. Generate a new export after changing those server settings.
+
+| Option | What it does |
+| --- | --- |
+| `--download-qr` | Downloads the QR image as `qr.png`; requires outbound HTTPS to QuickChart. |
+| `--output-dir PATH` | Saves the files in a new directory at `PATH`. |
+| `--root PATH` | Reads another OpenNHP install directory instead of `/opt/opennhp`. |
+| `--auth-service ID` | Sets the auth service ID; defaults to `example`. |
+| `--resource ID` | Sets the resource ID; defaults to `web`. |
+| `--help` | Prints usage and available options. |
+
+To save all three files in a specific directory:
+
+```bash
+sudo bash opennhp-share-config.sh --download-qr --output-dir /root/team-connection
+```
+
+For a server using custom auth service and resource IDs:
+
+```bash
+sudo bash opennhp-share-config.sh --auth-service my-service --resource my-resource
+```
+
+The output directory must be new and its parent must exist. Existing exports
+are never overwritten. `--root PATH` (or `NHP_ROOT`) selects another install
+location. The helper requires Python 3, already installed by the installer.
 
 ### Register with a one-time code
 
@@ -161,7 +237,7 @@ Set any of these on the same command to skip a prompt or change a default:
 | `PROTECTED_PORTS` | Asked during install | Skip the port prompt. A space- or comma-separated TCP port list, e.g. `PROTECTED_PORTS=80,443`. SSH (22) and the knock port are rejected. |
 | `KNOCK_PORT` | `62206` (or the installed server's value) | UDP port the NHP server listens on for knocks. Feeds the server config and the reserved set. Example: `KNOCK_PORT=62207`. |
 | `PUBLIC_IP` | Detected from `https://checkip.amazonaws.com` | Address clients should knock. You still confirm it. A DNS name is allowed. |
-| `OPENNHP_REF` | Asked during install | Skip the release menu. Example: `OPENNHP_REF=v1.0.2`. |
+| `OPENNHP_REF` | Asked during install | Skip the build menu. A release tag, e.g. `OPENNHP_REF=v1.0.2`, or `OPENNHP_REF=nightly` (equivalently `main`) to build the `main` branch. |
 | `GO_VERSION` | `1.26.0` | Go release installed under `/usr/local/go` when that exact version is missing. |
 | `ALLOW_UNSUPPORTED_UBUNTU` | `0` | Set to `1` to bypass the Ubuntu version check and install on an unsupported release at your own risk. The other checks still apply. |
 
@@ -292,6 +368,7 @@ Running `sudo bash opennhp-ubuntu-installer.sh` again keeps existing keys, asks 
 ```text
 /opt/opennhp/
   installer.env          version, agent public key, chosen revision, demo site, registration
+  shares/                exported connection JSON, QR links, and optional QR images
   secrets/               server, access controller, and optional agent keys
   source/                OpenNHP source and built programs
 
@@ -326,6 +403,7 @@ Running `sudo bash opennhp-ubuntu-installer.sh` again keeps existing keys, asks 
 ### 1.0.8 - 2026-10-24
 
 - You can now choose which TCP ports OpenNHP protects, instead of only TCP 80. Enter one or more ports at install time (default 80); SSH (22) and the knock port are rejected. Set `PROTECTED_PORTS` to skip the prompt. See [Choose which ports to protect](#choose-which-ports-to-protect).
+- Added a **nightly** build option that compiles from the OpenNHP `main` branch, alongside the published releases. Choose it from the build menu or set `OPENNHP_REF=nightly`. A re-run rebuilds when `main` has advanced.
 - The knock port is no longer hard-coded. It comes from the installed server's config (or `KNOCK_PORT`, default 62206) and feeds both the server configuration and the reserved-port set, so the reserved port always matches the port knocks actually arrive on.
 - Re-running the installer can change the protected ports without resetting keys or trusted devices. Firewall rules for ports no longer protected are removed automatically, and the 180-second rollback still applies.
 - The generated firewall rules now use a single multiport rule and reconcile themselves on each start/stop, so stale port rules are cleaned up.
