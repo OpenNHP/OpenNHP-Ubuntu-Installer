@@ -6,10 +6,45 @@ set -Eeuo pipefail
 umask 077
 
 # Keep this in sync with opennhp-manage-agents.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.8
+INSTALLER_VERSION=1.0.11
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   printf 'opennhp-ubuntu-installer.sh %s\n' "$INSTALLER_VERSION"
   exit 0
+fi
+
+usage(){
+  cat <<'USAGE'
+Usage: sudo bash opennhp-ubuntu-installer.sh [options]
+  --branch NAME  Build a branch instead of choosing a release.
+  --repo URL     HTTPS Git repository for --branch (default: official OpenNHP).
+  --help, -h     Show this help.
+  --version, -V  Show installer version.
+Custom source choices apply only to this invocation. Only use trusted code:
+the installer builds and runs it as root.
+USAGE
+}
+CUSTOM_BRANCH=''
+CUSTOM_REPO=https://github.com/OpenNHP/opennhp.git
+repo_supplied=0
+while (($#)); do
+  case $1 in
+    --branch|--repo)
+      [[ $# -ge 2 && -n $2 && $2 != --* ]] || { echo "Missing value for $1" >&2; exit 2; }
+      if [[ $1 == --branch ]]; then CUSTOM_BRANCH=$2; else CUSTOM_REPO=$2; repo_supplied=1; fi
+      shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    --version|-V) printf 'opennhp-ubuntu-installer.sh %s\n' "$INSTALLER_VERSION"; exit 0 ;;
+    *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
+  esac
+done
+if [[ $repo_supplied == 1 && -z $CUSTOM_BRANCH ]]; then
+  echo '--repo requires --branch.' >&2; exit 2
+fi
+if [[ $CUSTOM_REPO != https://* || $CUSTOM_REPO == https:// ]]; then
+  echo '--repo must be an HTTPS Git repository URL.' >&2; exit 2
+fi
+if [[ -n $CUSTOM_BRANCH && -n ${OPENNHP_REF:-} ]]; then
+  echo '--branch cannot be combined with OPENNHP_REF.' >&2; exit 2
 fi
 
 GO_VERSION=${GO_VERSION:-1.26.0}
@@ -188,6 +223,8 @@ uninstall_opennhp(){
   # Remove every INPUT jump into OPENNHP, whatever ports it covered, in case
   # the firewall-rules helper is missing (partial install).
   iptables -S INPUT 2>/dev/null | awk '/-j OPENNHP$/{$1="-D"; print}' | while read -r spec; do
+    # Rule text comes from iptables -S; splitting into arguments is intentional.
+    # shellcheck disable=SC2086
     iptables $spec 2>/dev/null || true
   done
   iptables -F OPENNHP 2>/dev/null || true
@@ -225,6 +262,8 @@ save_state(){
     [[ -n ${AGENT_PUB:-} ]] && printf 'AGENT_PUB=%q\n' "$AGENT_PUB"
     [[ -n ${OPENNHP_REF:-} ]] && printf 'OPENNHP_REF=%q\n' "$OPENNHP_REF"
     [[ -n ${BUILT_COMMIT:-} ]] && printf 'BUILT_COMMIT=%q\n' "$BUILT_COMMIT"
+    [[ -n ${ENABLED_PLUGINS:-} ]] && printf 'ENABLED_PLUGINS=%q\n' "$ENABLED_PLUGINS"
+    [[ -n ${PRIMARY_PLUGIN:-} ]] && printf 'PRIMARY_PLUGIN=%q\n' "$PRIMARY_PLUGIN"
     [[ -n ${ENABLE_OTP:-} ]] && printf 'ENABLE_OTP=%q\n' "$ENABLE_OTP"
     [[ -n ${INSTALL_DEMO:-} ]] && printf 'INSTALL_DEMO=%q\n' "$INSTALL_DEMO"
     [[ -n ${PROTECTED_PORTS:-} ]] && printf 'PROTECTED_PORTS=%q\n' "$PROTECTED_PORTS"
@@ -271,6 +310,8 @@ list_open_ports(){
   # Scan TCP and UDP listeners separately; the knock arrives on UDP, so a
   # UDP-only service (nhp-serverd) must not be hidden behind a TCP entry.
   for proto in tcp udp; do
+    # Only the local address and process details are displayed from ss columns.
+    # shellcheck disable=SC2034
     while read -r state rq sq laddr peer rest; do
       [[ -n $laddr ]] || continue
       port=${laddr##*:}
@@ -402,6 +443,9 @@ trap 'warn "Installer exited at line $LINENO. Re-run it to resume; existing keys
 
 [[ -t 0 && -e /dev/tty ]] || die 'Run interactively from an SSH terminal: sudo bash opennhp-ubuntu-installer.sh'
 [[ $EUID == 0 ]] || die 'Run with sudo: sudo bash opennhp-ubuntu-installer.sh'
+
+# Target-host metadata is not available to static analysis.
+# shellcheck source=/dev/null
 source /etc/os-release
 
 # Honor OPENNHP_REF and PROTECTED_PORTS from the command line. A value saved
@@ -411,12 +455,18 @@ PRESET_REF=${OPENNHP_REF-}
 PRESET_PORTS=${PROTECTED_PORTS-}
 PRESET_KNOCK=${KNOCK_PORT-}
 PREV_OTP=1
+PREV_PLUGINS=example
+PREV_PRIMARY=example
 PREV_DEMO=1
 PREV_PORTS=80
 PREV_KNOCK=62206
 script_version=$INSTALLER_VERSION
 if [[ -f $STATE ]]; then
+  # Installer-generated state lives on the target host.
+  # shellcheck source=/dev/null
   source "$STATE"
+  PREV_PLUGINS=${ENABLED_PLUGINS:-example}
+  PREV_PRIMARY=${PRIMARY_PLUGIN:-example}
   PREV_OTP=${ENABLE_OTP:-1}
   PREV_DEMO=${INSTALL_DEMO:-1}
   PREV_PORTS=${PROTECTED_PORTS:-80}
@@ -483,17 +533,6 @@ else
   ok 'Demo website will be skipped'
 fi
 
-say 'One-time registration'
-info 'Lets a device request a 6-digit code and register its own key.'
-info 'Until email is configured, the code is written to the server log.'
-if prompt_bool 'Enable one-time registration' "$PREV_OTP"; then
-  ENABLE_OTP=1
-  ok 'One-time registration will be enabled'
-else
-  ENABLE_OTP=0
-  ok 'One-time registration will be left off'
-fi
-
 say 'Protected ports'
 info 'OpenNHP guards one or more TCP ports; new connections drop until a knock opens them.'
 info "SSH (22) and the knock port (${KNOCK_PORT}) are never guarded. The default is TCP 80."
@@ -549,63 +588,175 @@ say 'Release'
 if [[ ! -d "$SRC/.git" ]]; then
   mkdir -p "$ROOT"
   info 'Cloning OpenNHP'
-  run_quiet 'Clone OpenNHP' git clone --quiet https://github.com/OpenNHP/opennhp.git "$SRC"
+  if [[ -n $CUSTOM_BRANCH ]]; then
+    run_quiet 'Initialize OpenNHP source' git init --quiet "$SRC"
+    git -C "$SRC" remote add origin https://github.com/OpenNHP/opennhp.git
+  else
+    run_quiet 'Clone OpenNHP' git clone --quiet https://github.com/OpenNHP/opennhp.git "$SRC"
+  fi
 fi
 cd "$SRC"
 restore_plugin_source
-# Fetch both tags and branches (the default clone refspec updates origin/main),
-# so the nightly option can track the latest development tip.
-run_quiet 'Fetch OpenNHP' git fetch --tags --quiet origin
-mapfile -t release_tags < <(git tag -l 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 10 || true)
-((${#release_tags[@]})) || die 'No OpenNHP release tags were found. Check network access to github.com.'
-# Selectable builds: the published releases, plus a nightly build from main.
-release_refs=("${release_tags[@]}" nightly)
-if [[ -n $PRESET_REF ]]; then
-  case ${PRESET_REF,,} in
-    nightly|main|origin/main) OPENNHP_REF=nightly ;;
-    *) OPENNHP_REF=$PRESET_REF ;;
-  esac
-  ok "Using OPENNHP_REF=$OPENNHP_REF from the environment"
+if [[ -n $CUSTOM_BRANCH ]]; then
+  git check-ref-format "refs/heads/$CUSTOM_BRANCH" >/dev/null || die "Invalid branch name: $CUSTOM_BRANCH"
+  warn 'Custom source: this code will be built and run as root. Use only trusted repositories.'
+  kv 'Repository' "$CUSTOM_REPO"
+  kv 'Branch' "$CUSTOM_BRANCH"
+  # An explicit refspec prevents tag/branch ambiguity and fetch failures cannot
+  # fall back to a previously fetched commit. Keep origin unchanged.
+  run_quiet 'Fetch custom branch' git fetch --no-tags --quiet "$CUSTOM_REPO" "+refs/heads/$CUSTOM_BRANCH:refs/opennhp-installer/custom"
+  checkout_ref=refs/opennhp-installer/custom
+  ref_label="$CUSTOM_BRANCH (custom)"
+  OPENNHP_REF=''
 else
-  info "1  ${release_tags[0]}  (latest release)"
-  for i in "${!release_tags[@]}"; do
-    (( i == 0 )) && continue
-    info "$((i+1))  ${release_tags[$i]}"
-  done
-  info "$((${#release_tags[@]}+1))  nightly (main branch, latest development)"
-  info 'Releases before v1.0.0 use an older configuration layout.'
-  default_choice=1
-  if [[ -n ${OPENNHP_REF:-} ]]; then
-    for i in "${!release_refs[@]}"; do
-      if [[ ${release_refs[$i]} == "$OPENNHP_REF" ]]; then default_choice=$((i+1)); break; fi
+  # Fetch both tags and branches (the default clone refspec updates origin/main),
+  # so the nightly option can track the latest development tip.
+  run_quiet 'Fetch OpenNHP' git fetch --tags --quiet origin
+  mapfile -t release_tags < <(git tag -l 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 10 || true)
+  ((${#release_tags[@]})) || die 'No OpenNHP release tags were found. Check network access to github.com.'
+  # Selectable builds: the published releases, plus a nightly build from main.
+  release_refs=("${release_tags[@]}" nightly)
+  if [[ -n $PRESET_REF ]]; then
+    case ${PRESET_REF,,} in
+      nightly|main|origin/main) OPENNHP_REF=nightly ;;
+      *) OPENNHP_REF=$PRESET_REF ;;
+    esac
+    ok "Using OPENNHP_REF=$OPENNHP_REF from the environment"
+  else
+    info "1  ${release_tags[0]}  (latest release)"
+    for i in "${!release_tags[@]}"; do
+      (( i == 0 )) && continue
+      info "$((i+1))  ${release_tags[$i]}"
     done
-  fi
-  while true; do
-    choice=$(ask "Select a build [${default_choice}]: ")
-    choice=${choice:-$default_choice}
-    if [[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#release_refs[@]} )); then
-      break
+    info "$((${#release_tags[@]}+1))  nightly (main branch, latest development)"
+    info 'Releases before v1.0.0 use an older configuration layout.'
+    default_choice=1
+    if [[ -n ${OPENNHP_REF:-} ]]; then
+      for i in "${!release_refs[@]}"; do
+        if [[ ${release_refs[$i]} == "$OPENNHP_REF" ]]; then default_choice=$((i+1)); break; fi
+      done
     fi
-    warn "Enter a number from 1 to ${#release_refs[@]}."
-  done
-  OPENNHP_REF=${release_refs[$((choice-1))]}
-fi
-# Resolve the choice to a concrete ref. "nightly" tracks origin/main, so each
-# run rebuilds when upstream main has advanced.
-if [[ $OPENNHP_REF == nightly ]]; then
-  checkout_ref=origin/main
-  ref_label='nightly (main)'
-else
-  checkout_ref=$OPENNHP_REF
-  ref_label=$OPENNHP_REF
+    while true; do
+      choice=$(ask "Select a build [${default_choice}]: ")
+      choice=${choice:-$default_choice}
+      if [[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#release_refs[@]} )); then
+        break
+      fi
+      warn "Enter a number from 1 to ${#release_refs[@]}."
+    done
+    OPENNHP_REF=${release_refs[$((choice-1))]}
+  fi
+  # Resolve the choice to a concrete ref. "nightly" tracks origin/main, so each
+  # run rebuilds when upstream main has advanced.
+  if [[ $OPENNHP_REF == nightly ]]; then
+    checkout_ref=origin/main
+    ref_label='nightly (main)'
+  else
+    checkout_ref=$OPENNHP_REF
+    ref_label=$OPENNHP_REF
+  fi
 fi
 git rev-parse --verify --quiet "${checkout_ref}^{commit}" >/dev/null || die "Unknown OpenNHP revision: $checkout_ref"
 target_commit=$(git rev-parse "${checkout_ref}^{commit}")
-if [[ $(git rev-parse HEAD) != "$target_commit" ]]; then
+if [[ $(git rev-parse --verify HEAD 2>/dev/null || true) != "$target_commit" ]]; then
+  # Both index and working tree must be clean before changing revisions.
+  # shellcheck disable=SC2015
   git diff --quiet && git diff --cached --quiet || die 'Existing source has local changes. Not overwriting.'
   git checkout --quiet --detach "$checkout_ref"
 fi
 ok "OpenNHP $ref_label ($(git rev-parse --short HEAD))"
+
+say 'Authentication plugins'
+info 'Enable at least one plugin. Existing choices are the defaults on updates.'
+info 'The primary plugin handles the protected ports and the local agent.'
+info 'Additional plugins keep their own resource configuration.'
+# Read upstream Makefile declarations without executing make or loading plugins.
+catalog=$(mktemp)
+python3 - "$SRC" >"$catalog" <<'PYTHON' || die 'Could not discover plugins.'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+seen = set()
+for makefile in sorted(root.glob('examples/server_plugin/*/Makefile')):
+    directory = makefile.parent
+    if not directory.resolve().is_relative_to(root.resolve()) or not re.fullmatch(r'[a-zA-Z0-9_-]+', directory.name):
+        raise SystemExit(f'Invalid plugin directory: {directory}')
+    # Only literal upstream-style PluginName assignments can be resolved safely.
+    names = re.findall(r'^\s*PluginName\s*(?::=|=)\s*([a-zA-Z0-9_-]{1,64})\s*(?:#.*)?$', makefile.read_text(), re.M)
+    if len(names) != 1:
+        print(f'  Skipping {directory.name}: cannot determine a literal PluginName from its Makefile.', file=sys.stderr)
+        continue
+    plugin_id = names[0]
+    if plugin_id in seen:
+        raise SystemExit(f'Duplicate plugin id {plugin_id}: {makefile}')
+    seen.add(plugin_id)
+    print('\t'.join((plugin_id, str(directory.relative_to(root)), directory.name)))
+PYTHON
+plugin_ids=(); plugin_dirs=()
+while IFS=$'\t' read -r id directory description; do
+  plugin_ids+=("$id"); plugin_dirs+=("$directory")
+  info "${#plugin_ids[@]}  $id — $description"
+done < "$catalog"
+rm -f "$catalog"
+((${#plugin_ids[@]})) || die 'No supported authentication plugins found in this source revision.'
+selected_plugins=(); selected_dirs=()
+while true; do
+  selected_plugins=(); selected_dirs=()
+  for i in "${!plugin_ids[@]}"; do
+    id=${plugin_ids[$i]}
+    default=0
+    [[ ",$PREV_PLUGINS," == *",$id,"* ]] && default=1
+    if prompt_bool "Enable $id" "$default"; then
+      selected_plugins+=("$id"); selected_dirs+=("${plugin_dirs[$i]}")
+    fi
+  done
+  if ((${#selected_plugins[@]} == 0)); then
+    warn 'Select at least one authentication plugin; NHP needs one to authorize knocks.'
+    continue
+  fi
+  break
+done
+primary_candidates=("${selected_plugins[@]}")
+PRIMARY_PLUGIN=${primary_candidates[0]}
+for id in "${primary_candidates[@]}"; do
+  [[ $id == "$PREV_PRIMARY" ]] && PRIMARY_PLUGIN=$id
+done
+if ((${#primary_candidates[@]} > 1)); then
+  info "Plugins eligible for the protected ports: ${primary_candidates[*]}"
+  while true; do
+    choice=$(ask "Primary authentication plugin [$PRIMARY_PLUGIN]: ")
+    choice=${choice:-$PRIMARY_PLUGIN}
+    valid=0
+    for id in "${primary_candidates[@]}"; do [[ $id == "$choice" ]] && valid=1; done
+    if [[ $valid == 1 ]]; then PRIMARY_PLUGIN=$choice; break; fi
+    warn 'Enter an enabled plugin ID from the list above.'
+  done
+fi
+ENABLED_PLUGINS=$(IFS=,; printf '%s' "${selected_plugins[*]}")
+kv 'Enabled plugins' "$ENABLED_PLUGINS"
+kv 'Primary plugin' "$PRIMARY_PLUGIN"
+for id in "${selected_plugins[@]}"; do
+  [[ $id == example ]] && continue
+  info "$id uses its supplied configuration. Configure identity providers, credentials, and any HTTP/TLS dependencies before continuing."
+  if [[ $id == "$PRIMARY_PLUGIN" ]]; then
+    info 'As primary, this plugin must support NHP authentication. Its resource.toml will be preserved.'
+    info 'Configure its backend addresses and ports for this host and the protected ports selected above.'
+  fi
+  confirm "Is $id configured for this host?" || die "Configure $id and rerun the installer."
+done
+ENABLE_OTP=0
+if [[ ",$ENABLED_PLUGINS," == *,example,* ]]; then
+  say 'One-time registration'
+  info 'Lets a device request a 6-digit code and register its own key.'
+  info 'Until email is configured, the code is written to the server log.'
+  if prompt_bool 'Enable one-time registration' "$PREV_OTP"; then
+    ENABLE_OTP=1
+    ok 'One-time registration will be enabled'
+  else
+    ENABLE_OTP=0
+    ok 'One-time registration will be left off'
+  fi
+
+fi
 
 say 'Build'
 # Upstream imports the KBS package on startup even for keygen; it creates this path.
@@ -619,7 +770,7 @@ otp_changed=0
 if [[ $rebuild == 1 ]]; then
   info 'Compiling. The first build can take a few minutes.'
 elif [[ $otp_changed == 1 ]]; then
-  info 'Rebuilding the example plugin for the registration choice.'
+  info 'Registration choice changed; selected plugins will be checked.'
 fi
 for spec in 'serverd:release/nhp-server/nhp-serverd' 'acd:release/nhp-ac/nhp-acd' 'agentd:release/nhp-agent/nhp-agentd'; do
   target=${spec%%:*}; bin=${spec#*:}
@@ -630,18 +781,32 @@ for spec in 'serverd:release/nhp-server/nhp-serverd' 'acd:release/nhp-ac/nhp-acd
     ok "$target built"
   fi
 done
-# The example plugin always exports registration handlers. Turning codes
-# off makes those handlers return an error instead of issuing a code.
-if [[ $ENABLE_OTP == 0 ]]; then
-  disable_plugin_otp
-fi
-if [[ $rebuild == 0 && $otp_changed == 0 && -f "$SERVER/plugins/example/example.so" ]]; then
-  ok 'Example plugin already built'
-else
-  run_quiet 'Build example plugin' make -C examples/server_plugin/basic
-  ok 'Example plugin built'
-fi
-[[ -x "$SERVER/nhp-serverd" && -x "$AC/nhp-acd" && -x "$AGENT/nhp-agentd" && -f "$SERVER/plugins/example/example.so" ]] || die 'Missing required build output'
+# Preserve deployed plugin settings before upstream Makefiles copy defaults.
+plugin_backup=$(mktemp -d)
+for i in "${!selected_plugins[@]}"; do
+  id=${selected_plugins[$i]}
+  if [[ -d "$SERVER/plugins/$id/etc" ]]; then
+    cp -a "$SERVER/plugins/$id/etc" "$plugin_backup/$id"
+  fi
+  if [[ $id == example && $ENABLE_OTP == 0 ]]; then disable_plugin_otp; fi
+  if [[ $id == example && $rebuild == 0 && $otp_changed == 0 && -f "$SERVER/plugins/$id/$id.so" ]]; then
+    ok "$id plugin already built"
+  else
+    if ! (run_quiet "Build $id plugin" make -C "${selected_dirs[$i]}"); then
+      if [[ -d "$plugin_backup/$id" ]]; then
+        cp -a "$plugin_backup/$id/." "$SERVER/plugins/$id/etc/"
+      fi
+      die "Plugin $id failed to build; saved settings are in $plugin_backup."
+    fi
+    ok "$id plugin built"
+  fi
+  if [[ -d "$plugin_backup/$id" ]]; then
+    cp -a "$plugin_backup/$id/." "$SERVER/plugins/$id/etc/"
+  fi
+  [[ -f "$SERVER/plugins/$id/$id.so" ]] || die "Missing plugin build output: $id/$id.so"
+done
+rm -rf "$plugin_backup"
+[[ -x "$SERVER/nhp-serverd" && -x "$AC/nhp-acd" && -x "$AGENT/nhp-agentd" ]] || die 'Missing required build output'
 BUILT_COMMIT=$head_now
 save_state
 
@@ -769,7 +934,7 @@ public_ip=${entered:-$public_ip}
 [[ -n $public_ip && $public_ip =~ ^[a-zA-Z0-9.-]+$ ]] || die 'Enter a valid IPv4 or DNS hostname (no URL scheme).'
 
 # Files are overwritten intentionally on reruns, keys are not.
-mkdir -p "$SERVER/etc" "$AC/etc" "$SERVER/plugins/example/etc" "$AGENT/etc"
+mkdir -p "$SERVER/etc" "$AC/etc" "$SERVER/plugins/$PRIMARY_PLUGIN/etc" "$AGENT/etc"
 cat > "$SERVER/etc/config.toml" <<EOF
 PrivateKeyBase64 = "$server_priv"
 DefaultCipherScheme = 0
@@ -873,10 +1038,11 @@ cat > "$SERVER/etc/ac.toml" <<EOF
 PubKeyBase64 = "$ac_pub"
 ExpireTime = $TTL
 EOF
-cat > "$SERVER/etc/resource.toml" <<'EOF'
-["example"]
-PluginPath = "example/example.so"
-EOF
+: > "$SERVER/etc/resource.toml"
+for id in "${selected_plugins[@]}"; do
+  printf '["%s"]\nPluginPath = "%s/%s.so"\n\n' "$id" "$id" "$id" >> "$SERVER/etc/resource.toml"
+done
+if [[ $ENABLED_PLUGINS == example ]]; then
 cat > "$SERVER/etc/http.toml" <<'EOF'
 EnableHttp = false
 EnableTLS = false
@@ -885,6 +1051,10 @@ HttpListenPort = 443
 TLSCertFile = "cert/cert.pem"
 TLSKeyFile = "cert/cert.key"
 EOF
+fi
+PRIMARY_RESOURCE=web
+PRIMARY_AC_ID=nhp-ac
+if [[ $PRIMARY_PLUGIN == example ]]; then
 # One backend per protected port, all under the "web" resource, so a single
 # knock opens every port the operator chose.
 web_backends=''
@@ -898,7 +1068,7 @@ for _p in "${_ports[@]}"; do
   web_backends+="Addr.Protocol = \"tcp\""$'\n'
   web_backends+="PortSuffix = false"$'\n'
 done
-cat > "$SERVER/plugins/example/etc/resource.toml" <<EOF
+cat > "$SERVER/plugins/$PRIMARY_PLUGIN/etc/resource.toml" <<EOF
 ["web"]
 SkipAuth = true
 OpenTime = 60
@@ -908,20 +1078,76 @@ CookieDomain = ""
 ${web_backends}["web".ExInfo]
 Title = "OpenNHP"
 EOF
-cat > "$SERVER/plugins/example/etc/config.toml" <<'EOF'
-ExampleUsername = "unused"
-ExamplePassword = "unused"
-require_email_match = true
-EOF
+else
+  # Read the deployed plugin's native resource TOML without changing it.
+  resources=$(mktemp)
+  python3 - "$SERVER/plugins/$PRIMARY_PLUGIN/etc/resource.toml" >"$resources" <<'PYTHON' || die 'Could not read custom plugin resources.'
+import re, sys
+try:
+    import tomllib
+except ImportError:
+    raise SystemExit('Reading custom plugin resources requires Python 3.11 or newer (Ubuntu 24.04+).')
+with open(sys.argv[1], 'rb') as handle:
+    resources = tomllib.load(handle)
+if not resources:
+    raise SystemExit('The primary plugin has no configured resources.')
+for resource_id, group in resources.items():
+    if not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}', resource_id) or not isinstance(group, dict):
+        raise SystemExit('Unsupported resource ID or resource table.')
+    backends = group.get('Resources', {})
+    if not isinstance(backends, dict) or not backends:
+        raise SystemExit(f'Resource {resource_id} has no backends.')
+    ac_ids = {backend.get('ACId', '') for backend in backends.values() if isinstance(backend, dict)}
+    if len(ac_ids) != 1:
+        raise SystemExit(f'Resource {resource_id} must use one AC on this single-host installer.')
+    ac_id = next(iter(ac_ids))
+    if not isinstance(ac_id, str) or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}', ac_id):
+        raise SystemExit(f'Invalid ACId for {resource_id}.')
+    print(resource_id + '\t' + ac_id)
+PYTHON
+  resource_ids=(); resource_acs=()
+  while IFS=$'\t' read -r resource_id ac_id; do
+    resource_ids+=("$resource_id"); resource_acs+=("$ac_id")
+    info "Resource: $resource_id (AC: $ac_id)"
+  done < "$resources"
+  rm -f "$resources"
+  ((${#resource_ids[@]})) || die 'The primary plugin has no usable resources.'
+  PRIMARY_RESOURCE=${resource_ids[0]}
+  PRIMARY_AC_ID=${resource_acs[0]}
+  if ((${#resource_ids[@]} > 1)); then
+    while true; do
+      choice=$(ask "Resource for this host [$PRIMARY_RESOURCE]: ")
+      choice=${choice:-$PRIMARY_RESOURCE}
+      valid=0
+      for i in "${!resource_ids[@]}"; do
+        if [[ ${resource_ids[$i]} == "$choice" ]]; then
+          PRIMARY_RESOURCE=$choice; PRIMARY_AC_ID=${resource_acs[$i]}; valid=1; break
+        fi
+      done
+      [[ $valid == 1 ]] && break
+      warn 'Enter a configured resource ID from the list above.'
+    done
+  fi
+  info "Using $PRIMARY_PLUGIN / $PRIMARY_RESOURCE with AC $PRIMARY_AC_ID."
+  info "Its configured backend IPs and ports must match this host and protected TCP ports $PROTECTED_PORTS."
+  confirm 'Have you verified those plugin resource settings?' || die 'Update the deployed plugin resource.toml and rerun.'
+fi
+# Preserve plugin configuration, including SMTP credentials, on reruns.
+if [[ ",$ENABLED_PLUGINS," == *,example,* ]]; then
+  config="$SERVER/plugins/example/etc/config.toml"
+  if ! grep -q '^[[:space:]]*require_email_match[[:space:]]*=' "$config"; then
+    printf '\nrequire_email_match = true\n' >> "$config"
+  fi
+fi
 cat > "$AC/etc/config.toml" <<EOF
-ACId = "nhp-ac"
+ACId = "$PRIMARY_AC_ID"
 DefaultIp = "$private_ip"
 PrivateKeyBase64 = "$ac_priv"
 DefaultCipherScheme = 0
 IpPassMode = 0
 LogLevel = 4
-AuthServiceId = "example"
-ResourceIds = ["web"]
+AuthServiceId = "$PRIMARY_PLUGIN"
+ResourceIds = ["$PRIMARY_RESOURCE"]
 FilterMode = 0
 [Metrics]
 Enabled = false
@@ -958,10 +1184,10 @@ ExpireTime = $TTL
 Ip = "$private_ip"
 Port = $KNOCK_PORT
 EOF
-  cat > "$AGENT/etc/resource.toml" <<'EOF'
+  cat > "$AGENT/etc/resource.toml" <<EOF
 [[Resources]]
-AuthServiceId = "example"
-ResourceId = "web"
+AuthServiceId = "$PRIMARY_PLUGIN"
+ResourceId = "$PRIMARY_RESOURCE"
 Cluster = "opennhp"
 EOF
   chmod 600 "$AGENT/etc/config.toml"
@@ -1136,9 +1362,14 @@ else
   kv 'Demo site' 'not installed'
 fi
 kv 'Knock' "$public_ip UDP ${KNOCK_PORT}"
-kv 'Resource' 'example / web'
+kv 'Plugins' "$ENABLED_PLUGINS"
+kv 'Resource' "$PRIMARY_PLUGIN / $PRIMARY_RESOURCE"
 kv 'Protected ports' "tcp ${PROTECTED_PORTS}"
-kv 'Open time' '60 seconds for new TCP connections'
+if [[ $PRIMARY_PLUGIN == example ]]; then
+  kv 'Open time' '60 seconds for new TCP connections'
+else
+  kv 'Open time' 'configured by the primary plugin resource.toml'
+fi
 if [[ $ENABLE_OTP == 1 ]]; then
   kv 'Registration' 'one-time codes, written to the server log'
 else

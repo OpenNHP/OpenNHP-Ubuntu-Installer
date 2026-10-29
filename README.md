@@ -1,6 +1,6 @@
 # OpenNHP Ubuntu installer
 
-**Version 1.0.8** (2026-10-24)
+**Version 1.0.11** (2026-10-29)
 
 [OpenNHP](https://github.com/OpenNHP/opennhp) hides your services behind an encrypted network "knock": the TCP ports you choose stay closed to everyone until a trusted device authenticates. This installer sets up and configures OpenNHP on a supported Ubuntu server for you, so you can try it - or protect an existing service - without building and wiring the components by hand.
 
@@ -30,9 +30,32 @@ cd OpenNHP-Ubuntu-Installer
 sudo bash opennhp-ubuntu-installer.sh
 ```
 
-The installer first prints a compatibility summary and stops if a required check fails. It then asks a few questions: demo site, one-time registration, which ports to protect, and whether to turn the firewall on, and when it finishes it prints the **NHP Server public key** and the knock address. Use those to [connect a client](#connect-a-client).
+The installer first prints a compatibility summary and stops if a required check fails. It then asks a few questions: demo site, which ports to protect, which authentication plugins to enable, optional one-time registration, and whether to turn the firewall on, and when it finishes it prints the **NHP Server public key** and the knock address. Use those to [connect a client](#connect-a-client).
 
 See [What the installer asks](#what-the-installer-asks) for a walk-through of the prompts, and [Configuration](#configuration) for non-interactive options.
+
+### Installing a custom branch
+
+For testing or custom installs, pass `--branch` to skip the release menu. Use
+`--repo` as well when the branch lives in a fork:
+
+```bash
+sudo bash opennhp-ubuntu-installer.sh \
+  --repo https://github.com/justingreerbbi/opennhp.git \
+  --branch feat/tcp-auth-relay-plugin
+```
+
+`--branch NAME` alone uses the official OpenNHP repository. `--repo` requires
+`--branch` and an HTTPS Git repository URL (not a GitHub `/tree/…` page).
+These flags apply only to that invocation: pass them again to update the custom
+branch to its latest commit. Running without them returns to the usual release
+menu. Do not combine `--branch` with `OPENNHP_REF`.
+
+Only use source you trust: the installer builds and runs it as root. Custom
+branches must retain the build targets and configuration layout the installer
+expects; plugins are discovered from their existing Makefiles as described in [Authentication plugins](#authentication-plugins).
+Existing keys are preserved and tracked source edits are protected as usual.
+Use `--help` to see the available flags.
 
 ### Setting up an AWS EC2 instance
 
@@ -71,7 +94,8 @@ Choice 2 stops the OpenNHP services, removes the OpenNHP firewall rules, and del
 You will also be asked:
 
 - Whether to install the demo website. Press Enter to install NGINX and a sample page. Answer `n` to leave an existing site alone. OpenNHP can still guard TCP port 80.
-- Whether to enable one-time registration. Press Enter to allow a device to register itself with a 6-digit code. Answer `n` to trust only keys you add. The example plugin is rebuilt so registration requests are rejected.
+- Which authentication plugins to enable, after choosing the source revision. At least one is required. Choose a primary plugin for the protected ports; existing selections are the defaults on updates.
+- Whether to enable one-time registration, when the example plugin is selected. Press Enter to allow a device to register itself with a 6-digit code. Answer `n` to trust only keys you add. The example plugin is rebuilt so registration requests are rejected.
 - Which build to install. Press Enter for the latest release, pick an older release, or choose **nightly** to build from the `main` branch (latest development).
 - Whether to generate an agent key on the server or paste a public key you already have.
 - The public address clients should use. The script suggests the address reported by AWS. Confirm it or type a hostname.
@@ -286,7 +310,7 @@ The plugin reloads this file on its own. After `smtp_host` is set, the next regi
 
 `smtp_port` defaults to `587` when it is omitted. If `smtp_username` is set, the plugin signs in with that username and password. The server log still records the send, including the code, on a line like `RequestOTP: otp[123456] sent to user@example.com` - treat that log as private.
 
-Running the installer again rewrites this config file and removes the SMTP settings. Put them back after a re-run, or they will not be used.
+Running the installer again preserves the plugin configuration, including SMTP settings, even when the plugin is rebuilt. Only the example plugin’s `resource.toml` is regenerated for the chosen protected ports. Custom resource files are preserved.
 
 ### Open window and trust duration
 
@@ -329,12 +353,12 @@ A knock is a small encrypted packet from a trusted device. Until that knock succ
 
 ## Installation steps in detail
 
-The script asks about the demo site and one-time registration, then installs OpenNHP. Command output from apt, git, and the compiler stays off the screen unless a command fails.
+The script asks about the demo site and protected ports, selects the source revision, then walks through plugin activation and optional example-plugin registration. Command output from apt, git, and the compiler stays off the screen unless a command fails.
 
 1. **Packages.** Installs anything missing from git, curl, ca-certificates, make, gcc, build-essential, iptables, ipset, python3, and openssl. NGINX is included only when you install the demo website.
 2. **Go.** Installs Go 1.26.0 under `/usr/local/go` when that version is not already there.
 3. **OpenNHP source.** Clones `https://github.com/OpenNHP/opennhp.git` into `/opt/opennhp/source`. The default checkout is the latest published release. Older releases are listed if you want one of those. Releases before v1.0.0 use an older layout. If the checkout has local edits, the script stops. It first removes a registration patch it added itself.
-4. **Build.** Compiles `nhp-serverd`, `nhp-acd`, `nhp-agentd`, and the `example` plugin. It creates `/opt/confidential-containers/kbs/repository` first, because key generation needs that directory. If one-time registration is off, the example plugin is built so a registration request returns an error.
+4. **Build.** Compiles `nhp-serverd`, `nhp-acd`, `nhp-agentd`, and the selected authentication plugins. It creates `/opt/confidential-containers/kbs/repository` first, because key generation needs that directory. If one-time registration is off, the example plugin is built so a registration request returns an error.
 5. **Server and access-controller keys.** Keeps `/opt/opennhp/secrets/server.json` and `ac.json` when they already exist. Otherwise it generates a Curve25519 key pair. Key generation also prints log text, so the installer extracts the key from that output and checks that it is 32 bytes.
 6. **Agent key.** Reuses a saved agent public key, generates a new pair in `secrets/agent.json`, or accepts a public key you paste. Choosing a new key removes the previous local `agent.json`.
 7. **Configuration.** Detects the private IPv4 address, asks you to confirm the public address, and writes the TOML files. `agent.toml` is the exception: trusted keys already there are kept. The installer deletes the upstream `remote.toml` file. If that file is left in place, the access controller tries to reach a lab etcd server and exits.
@@ -361,7 +385,7 @@ sudo ipset list defaultset
 sudo iptables -L OPENNHP -n -v
 ```
 
-Running `sudo bash opennhp-ubuntu-installer.sh` again keeps existing keys, asks about the demo site, one-time registration, and the agent public key again, rewrites configuration from the addresses you enter, and walks through the firewall question again. Press Enter at the demo and registration questions to keep the choice saved last time.
+Running `sudo bash opennhp-ubuntu-installer.sh` again keeps existing keys, asks about the demo site, one-time registration, and the agent public key again, rewrites configuration from the addresses you enter, and walks through the firewall question again. Press Enter at the demo, plugin, and registration questions to keep the choices saved last time. Plugin configuration is preserved, while only the example plugin’s protected-resource configuration is regenerated.
 
 ## Files on the server
 
@@ -396,9 +420,71 @@ Running `sudo bash opennhp-ubuntu-installer.sh` again keeps existing keys, asks 
 
 - Add a plugin to create an NHP-to-web-app authentication API. The example plugin is used today; it would be useful if NHP could read web-app data for legitimate user verification. Worth exploring.
 
+## Authentication plugins
+
+After selecting an OpenNHP release or custom branch, the installer lists supported
+plugins and asks whether to enable each one. You must select at least one. A fresh
+install defaults to `example`; updates default to the previous selection. Newly
+added custom plugins default to off. Disabling a plugin removes its registration
+from the server configuration and preserves its files and settings.
+
+Choose a **primary plugin** for the local AC and agent. For `example`, the installer
+generates the `web` resource for the selected TCP ports. For a custom plugin, it
+preserves `resource.toml`, lists the configured resources, and asks which one to
+use if there are several. The selected resource ID and its configured AC ID feed
+the local AC and agent; connection exports and agent-management output use the
+same resource and provider IDs. Additional plugins retain their supplied resources
+and need their own AC configuration as appropriate. The installer asks about OTP
+only when `example` is enabled; other registration behavior remains plugin-controlled.
+
+Plugins are discovered from existing `examples/server_plugin/*/Makefile` files
+in the selected source revision, including custom directories dropped there.
+The installer reads the upstream `PluginName = name` (or `:=`) declaration as
+text; discovery does not execute Makefiles or load plugin code. No installer-specific
+files are required in plugins and NHP’s runtime loading mechanism is unchanged.
+Duplicate IDs stop installation. Computed names that cannot be resolved without
+executing Make are reported and skipped.
+
+Selected plugins build using their existing Makefiles and must produce
+`release/nhp-server/plugins/<PluginName>/<PluginName>.so`, including their normal
+configuration and assets. Configure custom plugins’ credentials, identity providers,
+resources, and HTTP/TLS dependencies before confirming their setup prompt.
+Deployed plugin settings are preserved on updates. Custom plugins rebuild on every
+run so dropped-in source changes take effect. Only enable trusted code.
+
+The selected primary plugin must support NHP knock authentication and native
+resource TOML with a `Resources` backend table. Each resource offered by this
+single-host installer must name one AC ID across its backends. Custom-resource
+parsing requires Python 3.11 or newer (Ubuntu 24.04+). The setup prompt asks you to
+verify that backend IPs and ports match this host and the selected firewall ports;
+it does not rewrite them or alter `SkipAuth`, resource bindings, or authentication
+policy. When custom plugins are selected, existing/upstream server HTTP settings
+are preserved. Existing binary files alone are not offered as source plugins.
+
+If an earlier installer run overwrote a custom plugin’s resource file, restore it
+from your configured copy or the plugin source and adjust it for your host before
+rerunning. Preserving a file cannot recover its previous contents. For auth-bridge,
+resource IDs must match `config.toml` bindings and `SkipAuth` must be `false`.
+
 ## Changelog
 
 `INSTALLER_VERSION` is printed at startup and stored in `/opt/opennhp/installer.env`.
+
+### 1.0.11 - 2026-10-29
+
+- Preserve custom plugins’ resource files instead of replacing them with example-specific `web` and `SkipAuth = true` settings.
+- Select a configured custom resource and use its resource/AC IDs in local AC and agent settings, connection exports, and summaries.
+
+### 1.0.10 - 2026-10-29
+
+- Removed installer-specific plugin metadata. Discover plugins using their existing Makefile `PluginName` declarations without changing NHP’s plugin format or runtime loader.
+
+### 1.0.9 - 2026-10-29
+
+- Added authentication-plugin activation after source selection, with at least one plugin required, saved choices, and a primary provider for protected ports.
+- Added custom source plugin selection; only selected plugins are built and registered.
+- Ask about OTP only when the example plugin is enabled. Preserve deployed plugin settings, including SMTP, during rebuilds.
+- Use the primary provider in AC/agent configuration, connection exports, and agent-management output.
 
 ### 1.0.8 - 2026-10-24
 

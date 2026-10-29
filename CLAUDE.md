@@ -97,7 +97,7 @@ A version bump that accompanies a behavior change rides with that change's commi
 - The uninstall path (choice 2 when OpenNHP is already present) stops services, removes the TCP/80 firewall rules, and **deletes `/opt/opennhp`, including private keys and trusted devices**. Treat it as destructive.
 - Never commit private keys, `secrets/`, or anything from `/opt/opennhp` into the repo.
 - The installer guards only the TCP ports the operator chooses (default 80); it never touches SSH or the knock port. SSH (22) and the knock port (62206) are hard-rejected from the protected set in `normalize_ports()` — preserve that. The generated `/usr/local/sbin/nhp-firewall-rules` uses one `-m multiport` jump and reconciles all `INPUT -> OPENNHP` jumps on start/stop, so re-runs drop ports no longer protected.
-- Re-running the installer rewrites config files (and drops any manually added SMTP settings). Keep that documented behavior intact or update the README if you change it.
+- Re-running the installer rewrites core config and the example plugin’s resource file, while preserving custom resource files and deployed plugin configuration (including SMTP settings) across rebuilds. Plugin activation and Makefile discovery are documented in README.md.
 
 ## Protocol Context
 

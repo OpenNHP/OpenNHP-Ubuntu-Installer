@@ -19,8 +19,8 @@ import urllib.request
 parser = argparse.ArgumentParser(description='Export OpenNHP public connection settings and a QuickChart QR link. No API key required.')
 parser.add_argument('--root', default=os.environ.get('NHP_ROOT', '/opt/opennhp'), help='OpenNHP install directory (default: NHP_ROOT or /opt/opennhp)')
 parser.add_argument('--output-dir', help='New directory for the export; must not already exist')
-parser.add_argument('--auth-service', default='example', help='Auth service ID (default: example)')
-parser.add_argument('--resource', default='web', help='Resource ID (default: web)')
+parser.add_argument('--auth-service', help='Auth service ID (default: installed primary plugin, or example for older installs)')
+parser.add_argument('--resource', help='Resource ID (default: installed AC resource, or web for older installs)')
 parser.add_argument('--download-qr', action='store_true', help='Also contact QuickChart now to save qr.png; sends public connection details to QuickChart')
 args = parser.parse_args()
 
@@ -29,6 +29,17 @@ def main():
     root = Path(args.root)
     config_path = root / 'source/release/nhp-server/etc/config.toml'
     text = config_path.read_text(encoding='utf-8')
+    if args.auth_service is None:
+        ac_config = root / 'source/release/nhp-ac/etc/config.toml'
+        match = re.search(r'^AuthServiceId\s*=\s*"([a-zA-Z0-9_-]+)"',
+                          ac_config.read_text(encoding='utf-8'), re.M) if ac_config.is_file() else None
+        args.auth_service = match.group(1) if match else 'example'
+
+    if args.resource is None:
+        ac_config = root / 'source/release/nhp-ac/etc/config.toml'
+        match = re.search(r'^ResourceIds\s*=\s*\[\s*"([a-zA-Z0-9_.-]+)"',
+                          ac_config.read_text(encoding='utf-8'), re.M) if ac_config.is_file() else None
+        args.resource = match.group(1) if match else 'web'
     # Read only the installer-generated top-level scalars. This also works with
     # Ubuntu 22.04's Python 3.10, which does not include tomllib.
     top_level = re.split(r'^\s*\[', text, maxsplit=1, flags=re.M)[0]

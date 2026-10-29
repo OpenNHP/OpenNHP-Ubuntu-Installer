@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 
 # Keep this in sync with opennhp-ubuntu-installer.sh and the changelog in README.md.
-INSTALLER_VERSION=1.0.8
+INSTALLER_VERSION=1.0.11
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   printf 'opennhp-manage-agents.sh %s\n' "$INSTALLER_VERSION"
   exit 0
@@ -48,7 +48,7 @@ confirm(){ local v; v=$(ask "$1 [y/N]: "); [[ ${v,,} == y || ${v,,} == yes ]]; }
 
 worker=$(mktemp "$ROOT/.manage-agents.XXXXXX")
 cat >"$worker" <<'PY'
-import base64, json, os, sys
+import base64, json, os, pathlib, re, sys
 
 agent_toml, registry_path, secrets, server_config, ttl = sys.argv[1:6]
 ttl = int(ttl)
@@ -199,7 +199,17 @@ def cmd_add(name, public_key):
         print(f'    server key   {server_key}')
     if host:
         print(f'    knock        {host} UDP/62206')
-    print('    resource     example / web')
+    resource_config = pathlib.Path(server_config).parents[2] / 'nhp-ac/etc/config.toml'
+    service = 'example'
+    resource = 'web'
+    if resource_config.is_file():
+        match = re.search(r'^AuthServiceId\s*=\s*"([a-zA-Z0-9_-]+)"', resource_config.read_text(), re.M)
+        if match:
+            service = match.group(1)
+        match = re.search(r'^ResourceIds\s*=\s*\[\s*"([a-zA-Z0-9_.-]+)"', resource_config.read_text(), re.M)
+        if match:
+            resource = match.group(1)
+    print(f'    resource     {service} / {resource}')
 
 def cmd_remove(selector):
     selector = selector.strip()
